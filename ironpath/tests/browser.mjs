@@ -1,0 +1,132 @@
+import { createRequire } from 'module';
+const require = createRequire(import.meta.url);
+const { chromium } = require('/home/claude/.npm-global/lib/node_modules/playwright/index.js');
+import http from 'http';
+import { readFile } from 'fs/promises';
+import { existsSync, readdirSync } from 'fs';
+import path from 'path';
+
+const ROOT = path.resolve('.');
+const PORT = 8199;
+const MIME = { '.html': 'text/html', '.js': 'text/javascript', '.css': 'text/css',
+  '.json': 'application/json', '.webmanifest': 'application/manifest+json', '.png': 'image/png' };
+
+const server = http.createServer(async (req, res) => {
+  try {
+    let p = decodeURIComponent(req.url.split('?')[0]);
+    if (p === '/') p = '/index.html';
+    const file = path.join(ROOT, p);
+    if (!file.startsWith(ROOT) || !existsSync(file)) { res.writeHead(404); res.end('nf'); return; }
+    const data = await readFile(file);
+    res.writeHead(200, { 'Content-Type': MIME[path.extname(file)] || 'application/octet-stream' });
+    res.end(data);
+  } catch (e) { res.writeHead(500); res.end(String(e)); }
+});
+await new Promise(r => server.listen(PORT, r));
+
+const errors = [];
+const browser = await chromium.launch();
+const page = await browser.newPage({ viewport: { width: 430, height: 900 }, colorScheme: 'dark' });
+page.on('console', m => { if (m.type() === 'error') errors.push('console: ' + m.text()); });
+page.on('pageerror', e => errors.push('pageerror: ' + e.message));
+
+await page.goto(`http://localhost:${PORT}/`, { waitUntil: 'networkidle' });
+await page.waitForSelector('.tabbar', { timeout: 5000 });
+
+// import all sample files
+const dir = path.join(ROOT, 'tests/samples');
+const files = readdirSync(dir).map(f => path.join(dir, f));
+await page.setInputFiles('#fileInput', files);
+await page.waitForTimeout(1500);
+
+// seed weights, benchmark tests, race date + age directly into IndexedDB
+await page.evaluate(async () => {
+  const db = await new Promise((res, rej) => { const r = indexedDB.open('ironpath'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+  // 90 days of weight, gently declining 80.5 -> 78.6
+  const today = new Date();
+  const wtx = db.transaction('weights', 'readwrite').objectStore('weights');
+  for (let i = 90; i >= 0; i--) {
+    const d = new Date(today); d.setDate(d.getDate() - i);
+    const date = d.toISOString().slice(0, 10);
+    const kg = 80.5 - (90 - i) / 90 * 1.9 + (Math.sin(i) * 0.15);
+    wtx.put({ date, kg: +kg.toFixed(1) });
+  }
+  const ttx = db.transaction('tests', 'readwrite').objectStore('tests');
+  ttx.put({ id: 'Tcss', type: 'swim_css', date: today.toISOString().slice(0, 10), t400: 380, t200: 185 });
+  ttx.put({ id: 'Trun', type: 'run_tt20', date: today.toISOString().slice(0, 10), distanceM: 4600, avgHr: 176 });
+  // settings: race date ~7 months out + age
+  const race = new Date(today); race.setMonth(race.getMonth() + 7);
+  const stx = db.transaction('meta', 'readwrite').objectStore('meta');
+  await new Promise(r => { const g = stx.get('settings'); g.onsuccess = () => {
+    const s = (g.result && g.result.value) || {};
+    s.raceDate = race.toISOString().slice(0, 10); s.raceName = 'Ironman Copenhagen'; s.age = 34;
+    s.loadBasis = 'combined'; s.energyBlend = 0.5;
+    db.transaction('meta', 'readwrite').objectStore('meta').put({ key: 'settings', value: s });
+    r();
+  }; });
+});
+await page.reload({ waitUntil: 'networkidle' });
+await page.waitForSelector('.tabbar');
+await page.waitForTimeout(600);
+
+const shot = async (name) => { await page.waitForTimeout(400); await page.screenshot({ path: `tests/shot_${name}.png` }); };
+async function tab(name) { await page.click(`.tab[data-tab="${name}"]`); await page.waitForTimeout(500); }
+
+const hasReadyChip = await page.locator('text=Readiness').count();
+await shot('home');
+
+await tab('coach');
+const hasPred = await page.locator('text=Ironman finish projection').count();
+const hasReady = await page.locator('text=Race readiness').count();
+const hasCal = await page.locator('text=Self-calibrating').count();
+const hasEst = await page.locator('text=Estimated from your history').count();
+const hasBest = await page.locator('text=Best efforts').count();
+const hasRace = await page.locator('text=Race-day plan').count();
+const hasDur = await page.locator('text=Durability').count();
+await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+await page.screenshot({ path: 'tests/shot_coach_full.png', fullPage: true });
+await page.evaluate(() => window.scrollTo(0, 0));
+
+// Plan: generate, adaptation card, taper, workout export
+await tab('plan');
+await page.click('[data-action="genPlan"]').catch(() => {});
+await page.waitForTimeout(700);
+const hasAdapt = await page.locator('text=Plan on track, text=Plan adaptation').count()
+  + await page.locator('text=Plan on track').count() + await page.locator('text=adaptation').count();
+await page.click('[data-action="genTaper"]').catch(() => {});
+await page.waitForTimeout(500);
+const hasTaper = await page.locator('.week:has-text("")').count(); // weeks rendered
+await page.screenshot({ path: 'tests/shot_plan.png' });
+// open a workout modal
+await page.click('[data-action="exportWorkout"]').catch(() => {});
+await page.waitForTimeout(400);
+const hasWorkoutModal = await page.locator('.modal:has-text("Garmin workout")').count();
+await page.screenshot({ path: 'tests/shot_workout.png' });
+await page.locator('#wk_close').click().catch(() => {});
+
+await tab('log'); await shot('log');
+await tab('stats');
+await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+await shot('stats');
+await page.click('#gearBtn'); await page.waitForTimeout(300);
+const hasAutoReg = await page.locator('text=Auto-regulation').count();
+await tab('ai');
+const aiOk = await page.evaluate(() => !!window.__ai && window.__ai.prompt.includes('self-calibrating') && !!window.__ai.payload.raceDayPlan);
+
+const nSess = await page.evaluate(async () => {
+  const db = await new Promise(res => { const r = indexedDB.open('ironpath'); r.onsuccess = () => res(r.result); });
+  return await new Promise(res => { const tx = db.transaction('activities').objectStore('activities').getAll(); tx.onsuccess = () => res(tx.result.length); });
+});
+
+console.log('sessions:', nSess, '| readiness chip:', !!hasReadyChip);
+console.log('coach: predictions', !!hasPred, '| readiness', !!hasReady, '| calibration', !!hasCal, '| estimates', !!hasEst, '| best-efforts', !!hasBest, '| race-day', !!hasRace, '| durability', !!hasDur);
+console.log('plan: adaptation card', !!hasAdapt, '| taper weeks rendered', hasTaper, '| workout modal', !!hasWorkoutModal);
+console.log('setup auto-regulation card:', !!hasAutoReg);
+console.log('AI export has raceDayPlan + new fields:', aiOk);
+console.log('errors:', errors.length ? errors : 'none');
+
+await browser.close();
+server.close();
+const failed = errors.length || nSess < 80 || !hasPred || !hasReady || !hasCal || !hasEst
+  || !hasBest || !hasRace || !hasDur || !hasReadyChip || !hasWorkoutModal || !hasAutoReg || !aiOk;
+process.exit(failed ? 1 : 0);
