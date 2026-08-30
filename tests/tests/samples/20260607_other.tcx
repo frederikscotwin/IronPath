@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2">
+ <Activities><Activity Sport="Other">
+  <Id>2026-06-07T08:00:00Z</Id>
+  <Lap StartTime="2026-06-07T08:00:00Z">
+   <TotalTimeSeconds>2160</TotalTimeSeconds>
+   <DistanceMeters>2052</DistanceMeters>
+   <Calories>324</Calories>
+   <AverageHeartRateBpm><Value>140</Value></AverageHeartRateBpm>
+   <MaximumHeartRateBpm><Value>168</Value></MaximumHeartRateBpm>
+   <Track>
+        <Trackpoint><Time>2026-06-07T08:00:00Z</Time>
+          <AltitudeMeters>20.0</AltitudeMeters>
+          <HeartRateBpm><Value>148</Value></HeartRateBpm></Trackpoint>
+        <Trackpoint><Time>2026-06-07T08:07:12Z</Time>
+          <AltitudeMeters>26.7</AltitudeMeters>
+          <HeartRateBpm><Value>157</Value></HeartRateBpm></Trackpoint>
+        <Trackpoint><Time>2026-06-07T08:14:24Z</Time>
+          <AltitudeMeters>27.3</AltitudeMeters>
+          <HeartRateBpm><Value>158</Value></HeartRateBpm></Trackpoint>
+        <Trackpoint><Time>2026-06-07T08:21:36Z</Time>
+          <AltitudeMeters>21.1</AltitudeMeters>
+          <HeartRateBpm><Value>149</Value></HeartRateBpm></Trackpoint>
+        <Trackpoint><Time>2026-06-07T08:28:48Z</Time>
+          <AltitudeMeters>13.9</AltitudeMeters>
+          <HeartRateBpm><Value>139</Value></HeartRateBpm></Trackpoint>
+        <Trackpoint><Time>2026-06-07T08:36:00Z</Time>
+          <AltitudeMeters>12.3</AltitudeMeters>
+          <HeartRateBpm><Value>137</Value></HeartRateBpm></Trackpoint>
+   </Track>
+  </Lap>
+ </Activity></Activities>
+</TrainingCenterDatabase>
