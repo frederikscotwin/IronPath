@@ -15,6 +15,13 @@ const server = http.createServer(async (req, res) => {
   try {
     let p = decodeURIComponent(req.url.split('?')[0]);
     if (p === '/') p = '/index.html';
+    if (p.startsWith('/mock/')) {
+      let body = ''; req.on('data', c => body += c); req.on('end', () => {
+        res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+        res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: "Got it — noting that and easing off.\n\n```ironpath-actions\n[{\"type\":\"add_journal\",\"date\":\"2026-08-30\",\"text\":\"AI test note\"}]\n```" } }] }));
+      });
+      return;
+    }
     const file = path.join(ROOT, p);
     if (!file.startsWith(ROOT) || !existsSync(file)) { res.writeHead(404); res.end('nf'); return; }
     const data = await readFile(file);
@@ -40,7 +47,7 @@ await page.setInputFiles('#fileInput', files);
 await page.waitForTimeout(1500);
 
 // seed weights, benchmark tests, race date + age directly into IndexedDB
-await page.evaluate(async () => {
+await page.evaluate(async (mockBase) => {
   const db = await new Promise((res, rej) => { const r = indexedDB.open('ironpath'); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
   // 90 days of weight, gently declining 80.5 -> 78.6
   const today = new Date();
@@ -61,10 +68,12 @@ await page.evaluate(async () => {
     const s = (g.result && g.result.value) || {};
     s.raceDate = race.toISOString().slice(0, 10); s.raceName = 'Ironman Copenhagen'; s.age = 34;
     s.loadBasis = 'combined'; s.energyBlend = 0.5;
+    s.aiEngine = 'cloud'; s.aiBaseUrl = mockBase; s.aiModel = 'mock';
+    s.aiScopes = { journal: true, wellness: true, plan: true, thresholds: true };
     db.transaction('meta', 'readwrite').objectStore('meta').put({ key: 'settings', value: s });
     r();
   }; });
-});
+}, `http://localhost:${PORT}/mock`);
 await page.reload({ waitUntil: 'networkidle' });
 await page.waitForSelector('.tabbar');
 await page.waitForTimeout(600);
@@ -110,8 +119,25 @@ await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
 await shot('stats');
 await page.click('#gearBtn'); await page.waitForTimeout(300);
 const hasAutoReg = await page.locator('text=Auto-regulation').count();
+// wellness check-in
+await tab('log');
+await page.fill('#wl_fatigue', '8').catch(() => {});
+await page.click('[data-action="saveWellness"]').catch(() => {});
+await page.waitForTimeout(300);
+const readinessAfterWellness = await (async () => { await tab('home'); return page.locator('text=high fatigue').count(); })();
+
+// AI chat -> propose -> approve (via mock endpoint)
 await tab('ai');
 const aiOk = await page.evaluate(() => !!window.__ai && window.__ai.prompt.includes('self-calibrating') && !!window.__ai.payload.raceDayPlan);
+await page.fill('#chatInput', 'Slept badly, legs are toast, ease this week.');
+await page.click('[data-action="sendChat"]');
+await page.waitForTimeout(1000);
+const hasAssistant = await page.locator('.chat-msg.assistant').count();
+const hasProposed = await page.locator('text=Proposed changes').count();
+await page.screenshot({ path: 'tests/shot_ai_chat.png' });
+await page.click('[data-action="approveActions"]').catch(() => {});
+await page.waitForTimeout(400);
+const journalHasAi = await page.locator('.pill:has-text("AI")').count();
 
 const nSess = await page.evaluate(async () => {
   const db = await new Promise(res => { const r = indexedDB.open('ironpath'); r.onsuccess = () => res(r.result); });
@@ -123,10 +149,13 @@ console.log('coach: predictions', !!hasPred, '| readiness', !!hasReady, '| calib
 console.log('plan: adaptation card', !!hasAdapt, '| taper weeks rendered', hasTaper, '| workout modal', !!hasWorkoutModal);
 console.log('setup auto-regulation card:', !!hasAutoReg);
 console.log('AI export has raceDayPlan + new fields:', aiOk);
+console.log('wellness->readiness reason shown:', !!readinessAfterWellness);
+console.log('AI chat: assistant reply', !!hasAssistant, '| proposed-changes card', !!hasProposed, '| applied AI journal entry', !!journalHasAi);
 console.log('errors:', errors.length ? errors : 'none');
 
 await browser.close();
 server.close();
 const failed = errors.length || nSess < 80 || !hasPred || !hasReady || !hasCal || !hasEst
-  || !hasBest || !hasRace || !hasDur || !hasReadyChip || !hasWorkoutModal || !hasAutoReg || !aiOk;
+  || !hasBest || !hasRace || !hasDur || !hasReadyChip || !hasWorkoutModal || !hasAutoReg || !aiOk
+  || !hasAssistant || !hasProposed || !journalHasAi || !readinessAfterWellness;
 process.exit(failed ? 1 : 0);

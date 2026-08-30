@@ -86,11 +86,20 @@ export const DEFAULT_SETTINGS = {
   stravaAccessToken: '',
   stravaTokenExpiry: 0,
 
+  // In-app AI coach. Provider-agnostic (OpenAI-compatible) OR on-device (WebLLM).
+  aiEngine: 'cloud',          // 'cloud' | 'local'
+  aiBaseUrl: '',              // e.g. https://api.openai.com/v1, https://openrouter.ai/api/v1, http://localhost:11434/v1
+  aiModel: '',                // e.g. gpt-4o-mini, anthropic/claude-3.5-sonnet, llama3.1
+  aiApiKey: '',               // stored locally; sent only to your chosen endpoint
+  aiLocalModel: 'Llama-3.2-3B-Instruct-q4f16_1-MLC', // WebLLM model id for on-device
+  aiScopes: { journal: true, wellness: true, plan: true, thresholds: true }, // what the AI may edit (all via approval)
+  aiSubjectiveWeight: 1.0,    // how strongly perceived fatigue nudges readiness (0 = ignore)
+
   version: 1,
 };
 
 const DB_NAME = 'ironpath';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 
 function openDb() {
   return new Promise((resolve, reject) => {
@@ -110,6 +119,12 @@ function openDb() {
       }
       if (!db.objectStoreNames.contains('tests')) {
         db.createObjectStore('tests', { keyPath: 'id' }); // benchmark efforts
+      }
+      if (!db.objectStoreNames.contains('wellness')) {
+        db.createObjectStore('wellness', { keyPath: 'date' }); // daily perceived fatigue/sleep/soreness
+      }
+      if (!db.objectStoreNames.contains('journal')) {
+        db.createObjectStore('journal', { keyPath: 'id' }); // journal entries (user + AI)
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -204,26 +219,58 @@ export async function deleteTest(id) {
   return done(tx(db, 'tests', 'readwrite').delete(id));
 }
 
+// ---- daily wellness (perceived fatigue/sleep/soreness) ----------------------
+
+export async function getAllWellness() {
+  const db = await openDb();
+  const rows = await done(tx(db, 'wellness', 'readonly').getAll());
+  return rows.sort((a, b) => a.date.localeCompare(b.date));
+}
+export async function putWellness(entry) {
+  const db = await openDb();
+  return done(tx(db, 'wellness', 'readwrite').put(entry)); // { date, fatigue, sleep, soreness, stress, mood, note }
+}
+export async function deleteWellness(date) {
+  const db = await openDb();
+  return done(tx(db, 'wellness', 'readwrite').delete(date));
+}
+
+// ---- journal ----------------------------------------------------------------
+
+export async function getAllJournal() {
+  const db = await openDb();
+  const rows = await done(tx(db, 'journal', 'readonly').getAll());
+  return rows.sort((a, b) => (b.date || '').localeCompare(a.date || ''));
+}
+export async function putJournalEntry(entry) {
+  const db = await openDb();
+  return done(tx(db, 'journal', 'readwrite').put(entry)); // { id, date, text, tags, source:'user'|'ai' }
+}
+export async function deleteJournalEntry(id) {
+  const db = await openDb();
+  return done(tx(db, 'journal', 'readwrite').delete(id));
+}
+
 // ---- full backup ------------------------------------------------------------
 
 export async function exportBackup() {
-  const [activities, settings, plan, weights, tests] = await Promise.all([
-    getAllActivities(), getSettings(), getPlan(), getAllWeights(), getAllTests()]);
-  return { app: 'ironpath', version: 2, exportedAt: new Date().toISOString(), settings, plan, activities, weights, tests };
+  const [activities, settings, plan, weights, tests, wellness, journal] = await Promise.all([
+    getAllActivities(), getSettings(), getPlan(), getAllWeights(), getAllTests(), getAllWellness(), getAllJournal()]);
+  return { app: 'ironpath', version: 3, exportedAt: new Date().toISOString(), settings, plan, activities, weights, tests, wellness, journal };
 }
 
 export async function importBackup(obj, mode = 'merge') {
   if (!obj || obj.app !== 'ironpath') throw new Error('Not an IronPath backup file.');
   if (mode === 'replace') {
     const db = await openDb();
-    await done(tx(db, 'activities', 'readwrite').clear());
-    await done(tx(db, 'weights', 'readwrite').clear());
-    await done(tx(db, 'tests', 'readwrite').clear());
+    for (const s of ['activities', 'weights', 'tests', 'wellness', 'journal']) await done(tx(db, s, 'readwrite').clear());
   }
   if (obj.settings) await saveSettings(obj.settings);
   if (obj.plan) await savePlan(obj.plan);
   if (obj.activities) await putActivities(obj.activities);
   for (const w of (obj.weights || [])) await putWeight(w.date, w.kg);
   for (const t of (obj.tests || [])) await putTest(t);
+  for (const w of (obj.wellness || [])) await putWellness(w);
+  for (const j of (obj.journal || [])) await putJournalEntry(j);
   return { count: (obj.activities || []).length };
 }

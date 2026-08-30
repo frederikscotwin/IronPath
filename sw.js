@@ -1,5 +1,5 @@
 // sw.js — offline app shell. Bump CACHE when you change the shell files.
-const CACHE = 'ironpath-v5';
+const CACHE = 'ironpath-v6';
 const SHELL = [
   './',
   'index.html',
@@ -16,6 +16,8 @@ const SHELL = [
   'js/adapt.js',
   'js/race.js',
   'js/fitworkout.js',
+  'js/aicoach.js',
+  'js/webllm.js',
   'js/aiexport.js',
   'icons/icon-192.png',
   'icons/icon-512.png',

@@ -74,6 +74,23 @@ export async function fetchStravaStreams(token, id, sport) {
   return streamMetrics(stream, sport);
 }
 
+// Detailed activity: perceived exertion, description, private note, relative
+// effort, calories, gear — fields the summary list endpoint doesn't include.
+export async function fetchStravaDetail(token, id) {
+  const res = await fetch(`https://www.strava.com/api/v3/activities/${id}?include_all_efforts=false`, { headers: { Authorization: `Bearer ${token}` } });
+  if (res.status === 429) throw new Error('Strava rate limit hit — try again in a few minutes.');
+  if (!res.ok) return null;
+  const a = await res.json();
+  return {
+    perceivedExertion: a.perceived_exertion ?? null, // 1-10 if you logged it
+    description: a.description || '',
+    privateNote: a.private_note || '',
+    relativeEffort: a.suffer_score ?? null,
+    calories: a.calories ?? null,
+    gear: a.gear ? (a.gear.name || null) : null,
+  };
+}
+
 // Optional: exchange an authorization code / refresh token via your serverless
 // proxy (so client secret never touches the browser). proxyUrl is your function.
 export async function refreshViaProxy(proxyUrl, refreshToken) {
