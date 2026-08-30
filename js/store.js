@@ -23,16 +23,60 @@ export const DEFAULT_SETTINGS = {
   cssSpeed: 1.00,            // Critical Swim Speed ~ 1:40 /100m
   runThresholdSpeed: 3.70,  // ~ 4:30 /km
 
-  // Performance Management Chart time constants (days).
+  // Performance Management Chart time constants (days). The self-calibration
+  // can suggest better values fitted to your data; you approve them here.
   ctlDays: 42,   // fitness
   atlDays: 7,    // fatigue
   seedCtl: 0,
   seedAtl: 0,
+  loadBasis: 'trimp',   // 'trimp' (HR strain), 'energy' (kcal), or 'combined'
+  energyBlend: 0.5,     // combined basis: weight on energy (0=all TRIMP, 1=all energy)
+
+  // Energy model (Keytel HR->kcal needs these). Age optional but improves it.
+  age: null,
+  defaultWeightKg: 75,  // used until you log a weight
+  weightUnit: 'kg',
 
   // Suggestion thresholds.
   tsbDeepFatigue: -25,
   tsbVeryFresh: 15,
   rampWarn: 8,   // fitness points/week considered a fast (injury-risk) ramp
+
+  // Which fields are user-set vs. estimated from history. When a field is
+  // 'estimated', the app is free to keep refreshing it; 'manual' is locked.
+  sources: { maxHr: 'manual', restHr: 'manual', lthr: 'estimated', cssSpeed: 'manual', runThresholdSpeed: 'manual' },
+  lthr: null,          // lactate/functional threshold HR (estimated unless set)
+  zoneModel: 'lthr',   // 'lthr' or 'maxhr'
+
+  // Ironman finish-projection assumptions (all editable).
+  imSwimFactor: 1.06,  // open-water sustained pace vs CSS (×slower)
+  imBikeTargetKmh: 0,  // 0 = derive from your recent long rides
+  imBikeIF: 0.70,
+  imRunFactor: 1.10,   // marathon pace vs threshold pace (×slower)
+  transitionsMin: 8,
+  weightEconomyPct: 1.0, // % run improvement per % bodyweight drop
+  raceBaselineWeight: 0, // 0 = use current smoothed weight
+
+  // Auto-regulation / adaptive plan.
+  acwrHigh: 1.5,          // acute:chronic ratio danger threshold
+  acwrLow: 0.8,           // below this = detraining/undertrained
+  monotonyHigh: 2.5,      // Foster monotony injury/illness advisory (add variety)
+  adaptHorizonDays: 7,    // how far ahead the adaptation pass reshapes
+  adaptCutPct: 0.6,       // how much a hard session is cut when overreaching
+  autoAdaptApply: false,  // apply adaptations automatically vs. suggest-and-approve
+
+  // Race-day fuelling (per hour, on the bike+run).
+  fuelCarbsPerHr: 80,     // g/hr
+  fuelFluidMlPerHr: 600,  // ml/hr
+  fuelSodiumMgPerHr: 700, // mg/hr
+
+  // Taper.
+  taperWeeks: 3,
+  taperTargetTsb: 20,
+
+  // Threshold-test scheduler.
+  testIntervalWeeks: 6,
+  lastTestDate: '',
 
   // Goal.
   raceName: '',
@@ -46,7 +90,7 @@ export const DEFAULT_SETTINGS = {
 };
 
 const DB_NAME = 'ironpath';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 function openDb() {
   return new Promise((resolve, reject) => {
@@ -60,6 +104,12 @@ function openDb() {
       }
       if (!db.objectStoreNames.contains('meta')) {
         db.createObjectStore('meta', { keyPath: 'key' });
+      }
+      if (!db.objectStoreNames.contains('weights')) {
+        db.createObjectStore('weights', { keyPath: 'date' }); // { date:'YYYY-MM-DD', kg }
+      }
+      if (!db.objectStoreNames.contains('tests')) {
+        db.createObjectStore('tests', { keyPath: 'id' }); // benchmark efforts
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -122,11 +172,44 @@ export async function getPlan() {
 }
 export async function savePlan(p) { return setMeta('plan', p); }
 
+// ---- weights ----------------------------------------------------------------
+
+export async function getAllWeights() {
+  const db = await openDb();
+  const rows = await done(tx(db, 'weights', 'readonly').getAll());
+  return rows.sort((a, b) => a.date.localeCompare(b.date));
+}
+export async function putWeight(date, kg) {
+  const db = await openDb();
+  return done(tx(db, 'weights', 'readwrite').put({ date, kg }));
+}
+export async function deleteWeight(date) {
+  const db = await openDb();
+  return done(tx(db, 'weights', 'readwrite').delete(date));
+}
+
+// ---- benchmark tests --------------------------------------------------------
+
+export async function getAllTests() {
+  const db = await openDb();
+  const rows = await done(tx(db, 'tests', 'readonly').getAll());
+  return rows.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+}
+export async function putTest(test) {
+  const db = await openDb();
+  return done(tx(db, 'tests', 'readwrite').put(test));
+}
+export async function deleteTest(id) {
+  const db = await openDb();
+  return done(tx(db, 'tests', 'readwrite').delete(id));
+}
+
 // ---- full backup ------------------------------------------------------------
 
 export async function exportBackup() {
-  const [activities, settings, plan] = await Promise.all([getAllActivities(), getSettings(), getPlan()]);
-  return { app: 'ironpath', version: 1, exportedAt: new Date().toISOString(), settings, plan, activities };
+  const [activities, settings, plan, weights, tests] = await Promise.all([
+    getAllActivities(), getSettings(), getPlan(), getAllWeights(), getAllTests()]);
+  return { app: 'ironpath', version: 2, exportedAt: new Date().toISOString(), settings, plan, activities, weights, tests };
 }
 
 export async function importBackup(obj, mode = 'merge') {
@@ -134,9 +217,13 @@ export async function importBackup(obj, mode = 'merge') {
   if (mode === 'replace') {
     const db = await openDb();
     await done(tx(db, 'activities', 'readwrite').clear());
+    await done(tx(db, 'weights', 'readwrite').clear());
+    await done(tx(db, 'tests', 'readwrite').clear());
   }
   if (obj.settings) await saveSettings(obj.settings);
   if (obj.plan) await savePlan(obj.plan);
   if (obj.activities) await putActivities(obj.activities);
+  for (const w of (obj.weights || [])) await putWeight(w.date, w.kg);
+  for (const t of (obj.tests || [])) await putTest(t);
   return { count: (obj.activities || []).length };
 }

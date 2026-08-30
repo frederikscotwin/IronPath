@@ -25,6 +25,113 @@ function finalize(a, fileName) {
   return a;
 }
 
+// Mean-max effort durations (seconds): 5, 10, 20, 30, 60 min.
+const DURS = [300, 600, 1200, 1800, 3600];
+
+// Best sustained average of a cumulative quantity over the tightest window >= W.
+function windowsBest(times, cum, W) {
+  const n = times.length;
+  if (n < 2 || times[n - 1] - times[0] < W) return null;
+  let i = 0, best = null;
+  for (let j = 1; j < n; j++) {
+    while (i + 1 <= j && times[j] - times[i + 1] >= W) i++;
+    const dt = times[j] - times[i];
+    if (dt >= W) { const avg = (cum[j] - cum[i]) / dt; if (avg >= 0 && (best == null || avg > best)) best = avg; }
+  }
+  return best;
+}
+
+// From a stream of {t(sec), d(cumulative m|null), hr(bpm|null)} build the
+// best-effort curve: for each duration, the best sustained avg speed and HR.
+function meanMax(points, durs = DURS) {
+  const pts = (points || []).filter(p => Number.isFinite(p.t)).sort((a, b) => a.t - b.t);
+  if (pts.length < 3) return undefined;
+  const t0 = pts[0].t;
+  const times = pts.map(p => p.t - t0);
+  const total = times[times.length - 1];
+  const hasDist = pts.every(p => Number.isFinite(p.d));
+  const dist = hasDist ? pts.map(p => p.d) : null;
+  const hasHr = pts.some(p => Number.isFinite(p.hr));
+  let hrArea = null;
+  if (hasHr) {
+    hrArea = [0];
+    for (let k = 1; k < pts.length; k++) {
+      const dt = times[k] - times[k - 1];
+      const h0 = pts[k - 1].hr, h1 = pts[k].hr;
+      const seg = (Number.isFinite(h0) && Number.isFinite(h1)) ? (h0 + h1) / 2 * dt
+        : Number.isFinite(h1) ? h1 * dt : Number.isFinite(h0) ? h0 * dt : 0;
+      hrArea.push(hrArea[k - 1] + seg);
+    }
+  }
+  const out = {};
+  for (const W of durs) {
+    if (total < W) continue;
+    const rec = {};
+    const sp = dist ? windowsBest(times, dist, W) : null;
+    const hr = hrArea ? windowsBest(times, hrArea, W) : null;
+    if (Number.isFinite(sp) && sp > 0) rec.speed = +sp.toFixed(3);
+    if (Number.isFinite(hr) && hr > 0) rec.hr = Math.round(hr);
+    if (Object.keys(rec).length) out[String(Math.round(W / 60))] = rec;
+  }
+  return Object.keys(out).length ? { dur: out } : undefined;
+}
+
+// Minetti running energy cost vs gradient, normalized to flat — turns a segment
+// of distance on a slope into "equivalent flat" distance (grade-adjusted pace).
+function minettiFactor(i) {
+  i = Math.max(-0.35, Math.min(0.35, i));
+  const C = 155.4 * i ** 5 - 30.4 * i ** 4 - 43.3 * i ** 3 + 46.3 * i ** 2 + 19.5 * i + 3.6;
+  return C / 3.6;
+}
+function gapCum(points) {
+  const out = new Array(points.length).fill(0);
+  let cum = 0;
+  for (let k = 1; k < points.length; k++) {
+    const dd = points[k].d - points[k - 1].d;
+    const de = (points[k].ele ?? points[k - 1].ele ?? 0) - (points[k - 1].ele ?? points[k].ele ?? 0);
+    if (dd > 0) cum += dd * minettiFactor(de / dd);
+    out[k] = cum;
+  }
+  return out;
+}
+// Aerobic decoupling (%): how much efficiency (speed per beat) fades from the
+// first half to the second half of a long session. Low = good durability.
+function decoupling(points) {
+  const pts = points.filter(p => Number.isFinite(p.t));
+  if (pts.length < 10) return null;
+  const t0 = pts[0].t, total = pts[pts.length - 1].t - t0;
+  if (total < 45 * 60) return null;
+  const mid = t0 + total / 2;
+  const efOf = (a, b) => {
+    let d0 = null, d1 = null, area = 0, dur = 0, tPrev = null, hrPrev = null;
+    for (const p of pts) {
+      if (p.t < a || p.t > b) continue;
+      if (Number.isFinite(p.d)) { if (d0 == null) d0 = p.d; d1 = p.d; }
+      if (Number.isFinite(p.hr)) { if (tPrev != null) { area += (hrPrev + p.hr) / 2 * (p.t - tPrev); dur += p.t - tPrev; } tPrev = p.t; hrPrev = p.hr; }
+    }
+    const dist = (d1 != null && d0 != null) ? d1 - d0 : null;
+    const speed = dist != null ? dist / (b - a) : null;
+    const hr = dur > 0 ? area / dur : null;
+    return (speed && hr) ? speed / hr : null;
+  };
+  const ef1 = efOf(t0, mid), ef2 = efOf(mid, t0 + total);
+  if (!ef1 || !ef2) return null;
+  return +(((ef1 - ef2) / ef1) * 100).toFixed(1);
+}
+// One call for all stream-derived metrics, shared by file parsers and Strava.
+export function streamMetrics(stream, sport) {
+  const best = meanMax(stream);
+  const decoup = decoupling(stream);
+  let gapBest;
+  const hasEle = stream.some(p => Number.isFinite(p.ele));
+  const hasDist = stream.length > 2 && stream.every(p => Number.isFinite(p.d));
+  if (sport === 'run' && hasEle && hasDist) {
+    const g = gapCum(stream);
+    gapBest = meanMax(stream.map((p, i) => ({ t: p.t, d: g[i], hr: p.hr })));
+  }
+  return { best, decoupling: decoup, gapBest };
+}
+
 const R = 6371000; // earth radius m
 function haversine(lat1, lon1, lat2, lon2) {
   const toRad = x => x * Math.PI / 180;
@@ -65,6 +172,7 @@ export function parseTcx(text, fileName) {
     if (!laps.length) continue;
     let totalTime = 0, totalDist = 0, calories = 0, hrSum = 0, hrTimeWt = 0, maxHr = 0, ele = 0;
     let prevEle = null;
+    const stream = [];
     const startTime = laps[0].getAttribute('StartTime') || text.match(/<Id>([^<]+)<\/Id>/)?.[1];
     for (const lap of laps) {
       const t = num(lap, 'TotalTimeSeconds');
@@ -77,10 +185,16 @@ export function parseTcx(text, fileName) {
       if (cal) calories += cal;
       if (avgHr && t) { hrSum += avgHr * t; hrTimeWt += t; }
       if (mHr) maxHr = Math.max(maxHr, mHr);
-      // elevation gain from trackpoints
+      // trackpoints: elevation gain + stream for best-effort analysis
       for (const tp of lap.getElementsByTagName('Trackpoint')) {
         const e = num(tp, 'AltitudeMeters');
         if (e != null) { if (prevEle != null && e > prevEle) ele += e - prevEle; prevEle = e; }
+        const tEl = tp.getElementsByTagName('Time')[0];
+        const t = tEl ? Date.parse(tEl.textContent) / 1000 : null;
+        const dm = txtNum(tp, 'DistanceMeters');
+        const hrEl = childOf(tp, 'HeartRateBpm');
+        const hv = hrEl ? parseFloat(hrEl.getElementsByTagName('Value')[0]?.textContent) : NaN;
+        if (Number.isFinite(t)) stream.push({ t, d: Number.isFinite(dm) ? dm : null, hr: Number.isFinite(hv) ? hv : null, ele: Number.isFinite(e) ? e : null });
       }
     }
     // Pool swims sometimes come through as "Other"; if distance-per-time looks like swimming, hint it.
@@ -92,6 +206,8 @@ export function parseTcx(text, fileName) {
       maxHr: maxHr || null, calories: calories || null,
       elevationGainM: Math.round(ele) || null,
     }, fileName);
+    const m = streamMetrics(stream, sport);
+    a.best = m.best; a.decoupling = m.decoupling; a.gapBest = m.gapBest;
     out.push(a);
   }
   if (!out.length) throw new Error('No activities found in TCX file.');
@@ -114,6 +230,7 @@ export function parseGpx(text, fileName) {
     if (!pts.length) continue;
     let dist = 0, ele = 0, prevEle = null, hrSum = 0, hrN = 0, maxHr = 0;
     let firstT = null, lastT = null, prevLat = null, prevLon = null;
+    const stream = [];
     for (const pt of pts) {
       const lat = parseFloat(pt.getAttribute('lat'));
       const lon = parseFloat(pt.getAttribute('lon'));
@@ -125,9 +242,11 @@ export function parseGpx(text, fileName) {
       // HR lives in extensions (gpxtpx:hr or ns3:hr).
       const hrEl = pt.getElementsByTagName('hr')[0] ||
         [...pt.getElementsByTagName('*')].find(n => n.localName === 'hr' || n.tagName.endsWith(':hr'));
-      if (hrEl) { const h = parseFloat(hrEl.textContent); if (h) { hrSum += h; hrN++; maxHr = Math.max(maxHr, h); } }
+      let hv = NaN;
+      if (hrEl) { hv = parseFloat(hrEl.textContent); if (hv) { hrSum += hv; hrN++; maxHr = Math.max(maxHr, hv); } }
       if (!Number.isNaN(lat) && prevLat != null) dist += haversine(prevLat, prevLon, lat, lon);
       if (!Number.isNaN(lat)) { prevLat = lat; prevLon = lon; }
+      if (t) stream.push({ t: t.getTime() / 1000, d: dist, hr: Number.isFinite(hv) ? hv : null, ele: Number.isFinite(e) ? e : null });
     }
     const durationSec = firstT && lastT ? (lastT - firstT) / 1000 : 0;
     const a = finalize({
@@ -138,6 +257,8 @@ export function parseGpx(text, fileName) {
       maxHr: maxHr || null, calories: null,
       elevationGainM: Math.round(ele) || null,
     }, fileName);
+    const m = streamMetrics(stream, sport);
+    a.best = m.best; a.decoupling = m.decoupling; a.gapBest = m.gapBest;
     out.push(a);
   }
   if (!out.length) throw new Error('No tracks found in GPX file.');
@@ -174,6 +295,8 @@ export function parseFit(buffer, fileName) {
   const end = Math.min(headerSize + dataSize, buffer.byteLength);
   const defs = {};
   const sessions = [];
+  let timeBase = 0;   // rolling timestamp for compressed-timestamp records
+  let recBuf = [];    // record stream accumulated until each session closes
 
   const readVal = (p, kind, size, le) => {
     let v = null;
@@ -190,11 +313,15 @@ export function parseFit(buffer, fileName) {
   while (pos < end) {
     const header = dv.getUint8(pos++);
     if (header & 0x80) {
-      // compressed timestamp data message
+      // compressed timestamp data message — derive full timestamp from 5-bit offset
       const localType = (header >> 5) & 0x03;
       const def = defs[localType];
       if (!def) break;
-      pos = readDataMessage(def, pos);
+      const offset = header & 0x1f;
+      let ts = (timeBase & ~0x1f) + offset;
+      if (offset < (timeBase & 0x1f)) ts += 0x20;
+      timeBase = ts;
+      pos = readDataMessage(def, pos, ts);
     } else {
       const isDef = (header & 0x40) !== 0;
       const hasDev = (header & 0x20) !== 0;
@@ -218,12 +345,12 @@ export function parseFit(buffer, fileName) {
       } else {
         const def = defs[localType];
         if (!def) break;
-        pos = readDataMessage(def, pos);
+        pos = readDataMessage(def, pos, null);
       }
     }
   }
 
-  function readDataMessage(def, p) {
+  function readDataMessage(def, p, tsOverride) {
     const vals = {};
     for (const f of def.fields) {
       const meta = BASE[f.baseType];
@@ -235,7 +362,20 @@ export function parseFit(buffer, fileName) {
       if (!isInvalid(kind, unit, raw)) vals[f.num] = raw;
     }
     p += def.devTotal;
-    if (def.globalNum === 18) sessions.push(sessionFrom(vals));
+    if (vals[253] != null) timeBase = vals[253];
+    else if (tsOverride != null) vals[253] = tsOverride;
+    if (def.globalNum === 20) {
+      // record message: accumulate the stream (distance field 5 scale 100, hr field 3)
+      const t = vals[253];
+      const ele = vals[78] != null ? vals[78] / 5 - 500 : vals[2] != null ? vals[2] / 5 - 500 : null;
+      if (t != null) recBuf.push({ t, d: vals[5] != null ? vals[5] / 100 : null, hr: vals[3] != null ? vals[3] : null, ele });
+    } else if (def.globalNum === 18) {
+      const s = sessionFrom(vals);
+      const m = streamMetrics(recBuf, s.sport);
+      s.best = m.best; s.decoupling = m.decoupling; s.gapBest = m.gapBest;
+      sessions.push(s);
+      recBuf = [];
+    }
     return p;
   }
 
@@ -274,3 +414,6 @@ function txtNum(el, tag) {
   const n = parseFloat(c.textContent);
   return Number.isNaN(n) ? null : n;
 }
+
+// Exposed for unit tests only.
+export const _internal = { meanMax, windowsBest };

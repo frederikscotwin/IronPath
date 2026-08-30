@@ -225,6 +225,68 @@ pre.export { background: var(--bg-elev); border: 1px solid var(--line); border-r
 @media (min-width: 620px) { .modal-back { align-items: center; } .modal { border-radius: 18px; } }
 .modal h3 { margin: 2px 0 12px; font-size: 17px; }
 
+/* header right + gear */
+.header-right { display: flex; align-items: center; gap: 10px; }
+.gear { padding: 6px; border: none; background: transparent; color: var(--muted); border-radius: 8px; }
+.gear:hover { border: none; color: var(--accent); }
+.gear svg { width: 21px; height: 21px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; display: block; }
+
+/* key/value tables (estimates, splits) */
+.kv { width: 100%; border-collapse: collapse; font-size: 13.5px; }
+.kv td, .kv th { padding: 8px 6px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: middle; }
+.kv th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: .3px; }
+.kv td.num, .kv th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.kv tr:last-child td { border-bottom: none; }
+.conf { font-size: 10.5px; padding: 1px 6px; border-radius: 10px; border: 1px solid var(--line); color: var(--muted); }
+.conf.high { color: var(--good); border-color: color-mix(in srgb, var(--good) 45%, var(--line)); }
+.conf.med { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
+.conf.low { color: var(--faint); }
+.src { font-size: 10.5px; color: var(--faint); }
+
+/* readiness gauge */
+.readiness { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
+.gauge { --v: 0; width: 108px; height: 108px; border-radius: 50%; flex: none;
+  background: conic-gradient(var(--accent) calc(var(--v) * 1%), var(--line) 0);
+  display: grid; place-items: center; position: relative; }
+.gauge::before { content: ''; position: absolute; inset: 10px; border-radius: 50%; background: var(--card-solid); }
+.gauge .g-num { position: relative; font-size: 30px; font-weight: 750; }
+.readiness .r-parts { flex: 1; min-width: 180px; }
+.r-part { display: grid; grid-template-columns: 90px 1fr 34px; gap: 8px; align-items: center; font-size: 12.5px; margin: 5px 0; color: var(--muted); }
+.r-part .bar-track { height: 8px; }
+
+/* big prediction numbers */
+.pred-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 10px; }
+.pred { background: var(--bg-elev); border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+.pred .pk { font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: .3px; }
+.pred .pv { font-size: 22px; font-weight: 700; margin-top: 3px; font-variant-numeric: tabular-nums; }
+.pred .pu { font-size: 11px; color: var(--faint); }
+
+/* zones */
+.zone-table td.zc { color: var(--muted); }
+.acc-btn { white-space: nowrap; }
+
+/* readiness */
+.ready-dot { width: 16px; height: 16px; border-radius: 50%; flex: none; box-shadow: 0 0 0 4px color-mix(in srgb, currentColor 18%, transparent); }
+.ready-dot.green { background: var(--good); color: var(--good); }
+.ready-dot.amber { background: var(--warn); color: var(--warn); }
+.ready-dot.red { background: var(--danger); color: var(--danger); }
+.ready-dot.grey { background: var(--faint); color: var(--faint); }
+.ready-green { border-left: 3px solid var(--good); }
+.ready-amber { border-left: 3px solid var(--warn); }
+.ready-red { border-left: 3px solid var(--danger); }
+.ready-grey { border-left: 3px solid var(--faint); }
+
+/* adaptation diff */
+.diff { display: grid; grid-template-columns: 1fr auto; gap: 6px 12px; align-items: center; padding: 9px 0; border-bottom: 1px solid var(--line); }
+.diff:last-of-type { border-bottom: none; }
+.diff .d-title { font-weight: 600; }
+.diff .d-sub { font-size: 12px; color: var(--muted); }
+.diff .d-load { font-variant-numeric: tabular-nums; font-size: 13px; white-space: nowrap; }
+.diff .d-load .old { color: var(--faint); text-decoration: line-through; }
+.diff .d-load .new { color: var(--accent); font-weight: 700; }
+.toggle { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); cursor: pointer; }
+.toggle input { width: auto; }
+
 @media (min-width: 720px) {
   .dash-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
   .tiles { grid-template-columns: repeat(3, 1fr); }

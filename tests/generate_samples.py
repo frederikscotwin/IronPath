@@ -96,32 +96,84 @@ def u32(v): return struct.pack('<I', v & 0xFFFFFFFF)
 def fit_session():
     start_dt = datetime(2026, 8, 25, 8, 0, tzinfo=timezone.utc)
     start_fit = int(start_dt.timestamp()) - FIT_EPOCH
-    fields = [  # (num, size, base_type)
+    out = b''
+
+    # ---- record definition (local 1, global 20): timestamp, distance, hr, speed
+    rfields = [(253, 4, 0x86), (5, 4, 0x86), (3, 1, 0x02), (6, 2, 0x84)]
+    rdef = u8(0x41) + u8(0) + u8(0) + u16(20) + u8(len(rfields))
+    for (num, size, bt) in rfields:
+        rdef += u8(num) + u8(size) + u8(bt)
+    out += rdef
+
+    # 121 records over 60 min at 30s cadence; a hard, faster 20-min block mid-ride.
+    dist = 0.0
+    n = 121
+    for i in range(n):
+        t = start_fit + i * 30
+        mins = i * 30 / 60.0
+        hard = 20 <= mins <= 40
+        speed = 9.6 if hard else 7.6   # m/s
+        hr = 168 if hard else 134
+        dist += speed * 30
+        out += u8(0x01) + u32(t) + u32(int(dist * 100)) + u8(hr) + u16(int(speed * 1000))
+
+    # ---- session definition (local 0, global 18)
+    fields = [
         (253, 4, 0x86), (2, 4, 0x86), (7, 4, 0x86), (8, 4, 0x86), (9, 4, 0x86),
         (5, 1, 0x00), (16, 1, 0x02), (17, 1, 0x02), (11, 2, 0x84), (14, 2, 0x84),
     ]
-    # definition message, local type 0, global 18 (session)
     d = u8(0x40) + u8(0x00) + u8(0x00) + u16(18) + u8(len(fields))
     for (num, size, bt) in fields:
         d += u8(num) + u8(size) + u8(bt)
-    # data message
+    total_dist = dist
+    avg_speed = total_dist / (n * 30 - 30)
     vals = (
-        u32(start_fit + 3600) +  # timestamp (end)
-        u32(start_fit) +         # start_time
-        u32(3600 * 1000) +       # total_elapsed_time
-        u32(3600 * 1000) +       # total_timer_time
-        u32(30000 * 100) +       # total_distance 30km
-        u8(2) +                  # sport = cycling
-        u8(138) + u8(170) +      # avg/max hr
-        u16(700) +               # calories
-        u16(8333)                # avg_speed 8.333 m/s
+        u32(start_fit + 3600) + u32(start_fit) +
+        u32(3600 * 1000) + u32(3600 * 1000) +
+        u32(int(total_dist * 100)) +
+        u8(2) + u8(138) + u8(170) + u16(700) + u16(int(avg_speed * 1000))
     )
-    dm = u8(0x00) + vals
-    return d + dm
+    out += d + u8(0x00) + vals
+    return out
 
 data = fit_session()
 header = u8(12) + u8(0x20) + u16(2100) + u32(len(data)) + b'.FIT'
 buf = header + data + u16(0)  # dummy CRC (parser ignores)
 with open(f"{OUT}/ride.fit", 'wb') as f:
     f.write(buf)
-print(f"wrote 1 FIT file ({len(buf)} bytes)")
+print(f"wrote 1 FIT file with records ({len(buf)} bytes)")
+
+# ---- one dense-stream TCX run (60 min, 15s cadence, cumulative distance + HR)
+def tcx_dense_run(start):
+    tps = []
+    dist = 0.0
+    n = 240  # 60 min at 15s
+    for i in range(n):
+        t = start + timedelta(seconds=i * 15)
+        mins = i * 15 / 60.0
+        hard = 20 <= mins <= 40           # hard 20-min block
+        speed = 4.05 if hard else 3.25    # m/s (~4:07 vs ~5:08 /km)
+        hr = 172 if hard else 142
+        dist += speed * 15
+        tps.append(f"""      <Trackpoint><Time>{t.strftime('%Y-%m-%dT%H:%M:%SZ')}</Time>
+        <DistanceMeters>{dist:.1f}</DistanceMeters>
+        <HeartRateBpm><Value>{hr}</Value></HeartRateBpm></Trackpoint>""")
+    return f"""<?xml version="1.0" encoding="UTF-8"?>
+<TrainingCenterDatabase xmlns="http://www.garmin.com/xmlschemas/TrainingCenterDatabase/v2">
+ <Activities><Activity Sport="Running">
+  <Id>{start.strftime('%Y-%m-%dT%H:%M:%SZ')}</Id>
+  <Lap StartTime="{start.strftime('%Y-%m-%dT%H:%M:%SZ')}">
+   <TotalTimeSeconds>3600</TotalTimeSeconds><DistanceMeters>{dist:.1f}</DistanceMeters>
+   <Calories>560</Calories>
+   <AverageHeartRateBpm><Value>150</Value></AverageHeartRateBpm>
+   <MaximumHeartRateBpm><Value>178</Value></MaximumHeartRateBpm>
+   <Track>
+{chr(10).join(tps)}
+   </Track>
+  </Lap>
+ </Activity></Activities>
+</TrainingCenterDatabase>"""
+
+with open(f"{OUT}/dense_run.tcx", 'w') as f:
+    f.write(tcx_dense_run(today - timedelta(days=1, hours=6)))
+print("wrote 1 dense-stream TCX run")

@@ -6,6 +6,8 @@
 // a bearer token we use to fetch and normalize your activities.
 // -----------------------------------------------------------------------------
 
+import { streamMetrics } from './parsers.js';
+
 const STRAVA_SPORT = {
   Run: 'run', TrailRun: 'run', VirtualRun: 'run', Treadmill: 'run',
   Ride: 'bike', VirtualRide: 'bike', GravelRide: 'bike', MountainBikeRide: 'bike', EBikeRide: 'bike',
@@ -55,6 +57,21 @@ export async function fetchStravaActivities(token, afterEpoch = 0, maxPages = 10
     if (batch.length < 100) break;
   }
   return out;
+}
+
+// Fetch the full time-series for one activity and derive best-efforts,
+// decoupling and grade-adjusted efforts — the same metrics file import produces.
+export async function fetchStravaStreams(token, id, sport) {
+  const url = `https://www.strava.com/api/v3/activities/${id}/streams?keys=time,distance,heartrate,altitude&key_by_type=true`;
+  const res = await fetch(url, { headers: { Authorization: `Bearer ${token}` } });
+  if (res.status === 429) throw new Error('Strava rate limit hit — try again in a few minutes.');
+  if (!res.ok) return null;
+  const s = await res.json();
+  const time = s.time?.data;
+  if (!time || !time.length) return null;
+  const dist = s.distance?.data, hr = s.heartrate?.data, alt = s.altitude?.data;
+  const stream = time.map((t, i) => ({ t, d: dist ? dist[i] : null, hr: hr ? hr[i] : null, ele: alt ? alt[i] : null }));
+  return streamMetrics(stream, sport);
 }
 
 // Optional: exchange an authorization code / refresh token via your serverless

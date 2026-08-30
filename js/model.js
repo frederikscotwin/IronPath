@@ -119,18 +119,75 @@ export function mpsToPer100(mps) { return mps ? 100 / mps : null; }
 
 // ---- daily load series ------------------------------------------------------
 
-// Sum canonical load per calendar day. Returns Map<dayKey, {load, bySport}>.
-export function dailyLoads(activities, settings) {
+// Sum canonical load per calendar day. Returns Map<dayKey, {load, energy, bySport}>.
+// If `weights` is supplied, also accumulates estimated energy expenditure (kcal),
+// scaled by body mass on that day.
+export function dailyLoads(activities, settings, weights) {
+  const wOn = weights && weights.length ? weightInterpolator(weights) : null;
   const map = new Map();
   for (const a of activities) {
     const k = dayKey(a.startTime);
     const { load } = activityLoad(a, settings);
-    const cur = map.get(k) || { load: 0, bySport: {} };
+    const kcal = activityEnergy(a, settings, wOn ? wOn(k) : null);
+    const cur = map.get(k) || { load: 0, energy: 0, bySport: {} };
     cur.load += load;
+    cur.energy += kcal;
     cur.bySport[a.sport] = (cur.bySport[a.sport] || 0) + load;
     map.set(k, cur);
   }
   return map;
+}
+
+// ---- energy expenditure (kcal) ---------------------------------------------
+// Weight is what lets us turn a session into calories. With HR we use the
+// Keytel et al. (2005) regression (needs age + sex + mass); without HR we fall
+// back to a MET estimate scaled by mass and RPE. This is why logging weight
+// improves the fatigue picture: on the energy load-basis, heavier days and
+// higher-HR days cost more, exactly as they do physiologically.
+const MET_BASE = { swim: 6, bike: 6.5, run: 7.5, strength: 4.5, other: 5 };
+export function activityEnergy(act, settings, weightKg) {
+  const durMin = (act.durationSec || 0) / 60;
+  if (durMin <= 0) return 0;
+  const w = weightKg || settings.defaultWeightKg || 75;
+  if (act.avgHr) {
+    const age = settings.age || 35;
+    const kJmin = settings.gender === 'female'
+      ? (-20.4022 + 0.4472 * act.avgHr - 0.1263 * w + 0.074 * age)
+      : (-55.0969 + 0.6309 * act.avgHr + 0.1988 * w + 0.2017 * age);
+    return Math.max(0, (kJmin / 4.184) * durMin);
+  }
+  const r = act.rpe != null ? clamp((act.rpe - 1) / 9, 0, 1) : 0.5;
+  const met = (MET_BASE[act.sport] ?? 5) * (0.7 + 0.7 * r); // scale MET by effort
+  return met * 3.5 * w / 200 * durMin; // classic MET->kcal/min * min
+}
+
+// Most recent weight on/before a day (carry-forward), else earliest known.
+export function weightInterpolator(weights) {
+  const sorted = [...weights].filter(w => w && w.kg).sort((a, b) => a.date.localeCompare(b.date));
+  return (day) => {
+    let v = null;
+    for (const w of sorted) { if (w.date <= day) v = w.kg; else break; }
+    return v ?? (sorted[0] ? sorted[0].kg : null);
+  };
+}
+
+// Smoothed weight series + short-term trend, for readiness and prediction.
+export function weightTrend(weights, tau = 10) {
+  const sorted = [...weights].filter(w => w && w.kg).sort((a, b) => a.date.localeCompare(b.date));
+  if (!sorted.length) return { series: [], latest: null, smooth: null, dropPct7: 0 };
+  const k = 1 - Math.exp(-1 / tau);
+  const wOn = weightInterpolator(sorted);
+  const series = [];
+  let sm = sorted[0].kg;
+  for (const day of dayRange(sorted[0].date, dayKey(new Date()))) {
+    const raw = wOn(day);
+    sm = sm + (raw - sm) * k;
+    series.push({ day, kg: raw, smooth: sm });
+  }
+  const latest = series[series.length - 1];
+  const wk = series[Math.max(0, series.length - 8)];
+  const dropPct7 = wk ? (wk.smooth - latest.smooth) / wk.smooth * 100 : 0;
+  return { series, latest: latest.kg, smooth: latest.smooth, dropPct7 };
 }
 
 // ---- the Performance Management Chart ---------------------------------------
@@ -140,20 +197,45 @@ export function dailyLoads(activities, settings) {
 // CTL uses a long tau (fitness accrues slowly), ATL a short one (fatigue is
 // quick to rise and fall). TSB (form) is deliberately *yesterday's* fitness
 // minus fatigue, so a hard day today shows as fresh legs spent, not gained.
+// The load a given day contributes, honoring the chosen basis:
+//   trimp    — heart-rate strain (default)
+//   energy   — kcal (weight-driven)
+//   combined — a blend of the two, put on a common scale. Energy is rescaled so
+//              its mean matches TRIMP's (so the PMC numbers stay familiar), then
+//              blended: (1-w)*TRIMP + w*energyScaled, w = settings.energyBlend.
+export function basisScale(daily, basis) {
+  if (basis !== 'combined') return 1;
+  let t = 0, e = 0;
+  for (const v of daily.values()) { t += v.load; e += v.energy; }
+  return e > 0 ? t / e : 0;
+}
+export function resolveLoad(dayObj, basis, blend, scale) {
+  if (!dayObj) return 0;
+  if (basis === 'energy') return dayObj.energy;
+  if (basis === 'combined') { const w = clamp(blend ?? 0.5, 0, 1); return (1 - w) * dayObj.load + w * dayObj.energy * scale; }
+  return dayObj.load;
+}
+
 export function performanceChart(activities, settings, opts = {}) {
-  const daily = dailyLoads(activities, settings);
+  const daily = dailyLoads(activities, settings, opts.weights);
+  const basis = opts.basis || settings.loadBasis || 'trimp';
+  const blend = opts.energyBlend ?? settings.energyBlend ?? 0.5;
+  const scale = basisScale(daily, basis);
+  const pick = (d) => resolveLoad(d, basis, blend, scale);
   const keys = [...daily.keys()].sort();
   const start = opts.start || keys[0];
   const end = opts.end || dayKey(new Date());
   if (!start) return [];
 
-  const ctlTau = settings.ctlDays;
-  const atlTau = settings.atlDays;
+  const ctlTau = opts.ctlDays || settings.ctlDays;
+  const atlTau = opts.atlDays || settings.atlDays;
   const ctlK = 1 - Math.exp(-1 / ctlTau);
   const atlK = 1 - Math.exp(-1 / atlTau);
 
-  // Optional planned future load extends the projection past today.
-  const planned = opts.plannedDaily || new Map();
+  // Planned future load extends the projection past today. Planned targets are
+  // in TRIMP units (which the combined basis keeps on-scale), so we include them
+  // for trimp and combined but not for the pure-energy basis.
+  const planned = (basis !== 'energy') ? (opts.plannedDaily || new Map()) : new Map();
 
   let ctl = settings.seedCtl || 0;
   let atl = settings.seedAtl || 0;
@@ -161,15 +243,16 @@ export function performanceChart(activities, settings, opts = {}) {
   for (const day of dayRange(start, end)) {
     const actual = daily.get(day);
     const plan = planned.get(day);
-    const load = (actual ? actual.load : 0) + (plan ? plan : 0);
+    const load = pick(actual) + (plan ? plan : 0);
     const prevCtl = ctl, prevAtl = atl;
     ctl = prevCtl + (load - prevCtl) * ctlK;
     atl = prevAtl + (load - prevAtl) * atlK;
     out.push({
       day,
       load,
-      actualLoad: actual ? actual.load : 0,
+      actualLoad: pick(actual),
       plannedLoad: plan || 0,
+      energy: actual ? actual.energy : 0,
       bySport: actual ? actual.bySport : {},
       ctl,          // fitness
       atl,          // fatigue

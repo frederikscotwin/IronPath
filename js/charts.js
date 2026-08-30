@@ -127,6 +127,57 @@ export function loadBySportChart(bySport, sportColors) {
   }).join('')}</div>`;
 }
 
+// Weight: raw points (faint) + smoothed trend line.
+export function weightChart(series) {
+  if (!series || series.length < 2) return emptyChart('Log a few days of weight to see the trend.');
+  const W = 760, H = 220, padL = 40, padR = 12, padT = 12, padB = 28;
+  const iw = W - padL - padR, ih = H - padT - padB;
+  const n = series.length;
+  const vals = series.flatMap(p => [p.kg, p.smooth]).filter(Number.isFinite);
+  const b = niceBounds(Math.min(...vals), Math.max(...vals));
+  const x = i => padL + (i / (n - 1)) * iw;
+  const y = v => padT + ih - ((v - b.lo) / (b.hi - b.lo)) * ih;
+  let grid = '';
+  for (let v = b.lo; v <= b.hi + 1e-9; v += b.step) {
+    grid += `<line x1="${padL}" y1="${y(v)}" x2="${W - padR}" y2="${y(v)}" class="grid"/>`;
+    grid += `<text x="${padL - 6}" y="${y(v) + 3}" class="axis" text-anchor="end">${v % 1 ? v.toFixed(1) : v}</text>`;
+  }
+  const raw = series.map((p, i) => Number.isFinite(p.kg) ? `${i && Number.isFinite(series[i-1].kg) ? 'L' : 'M'} ${x(i)} ${y(p.kg)}` : '').join(' ');
+  const smooth = series.map((p, i) => `${i ? 'L' : 'M'} ${x(i)} ${y(p.smooth)}`).join(' ');
+  let xl = '';
+  const step = Math.max(1, Math.floor(n / 6));
+  for (let i = 0; i < n; i += step) xl += `<text x="${x(i)}" y="${H - 8}" class="axis" text-anchor="middle">${series[i].day.slice(5)}</text>`;
+  return `<svg viewBox="0 0 ${W} ${H}" class="chart" preserveAspectRatio="xMidYMid meet">${grid}
+    <path d="${raw}" fill="none" stroke="var(--faint)" stroke-width="1" opacity=".6"/>
+    <path d="${smooth}" fill="none" stroke="var(--accent-2)" stroke-width="2.4"/>${xl}</svg>`;
+}
+
+// Generic time-point trend (e.g. the aerobic performance index).
+export function trendChart(points, opts = {}) {
+  if (!points || points.length < 3) return emptyChart(opts.empty || 'Not enough data yet.');
+  const W = 760, H = 220, padL = 36, padR = 12, padT = 12, padB = 28;
+  const iw = W - padL - padR, ih = H - padT - padB;
+  const days = points.map(p => p.day);
+  const minD = days[0], maxD = days[days.length - 1];
+  const span = Math.max(1, (new Date(maxD) - new Date(minD)) / 86400000);
+  const xs = d => padL + ((new Date(d) - new Date(minD)) / 86400000 / span) * iw;
+  const vals = points.map(p => p.p);
+  const b = niceBounds(Math.min(...vals), Math.max(...vals));
+  const y = v => padT + ih - ((v - b.lo) / (b.hi - b.lo)) * ih;
+  let grid = '';
+  for (let v = b.lo; v <= b.hi + 1e-9; v += b.step) grid += `<line x1="${padL}" y1="${y(v)}" x2="${W - padR}" y2="${y(v)}" class="grid"/>`;
+  grid += `<line x1="${padL}" y1="${y(0)}" x2="${W - padR}" y2="${y(0)}" class="zero"/>`;
+  const dots = points.map(p => `<circle cx="${xs(p.day)}" cy="${y(p.p)}" r="2.4" fill="var(--accent)"><title>${p.day}: ${p.p.toFixed(2)}</title></circle>`).join('');
+  // simple moving trend line
+  const sorted = [...points].sort((a, b2) => a.day.localeCompare(b2.day));
+  const line = sorted.map((p, i) => `${i ? 'L' : 'M'} ${xs(p.day)} ${y(p.p)}`).join(' ');
+  let xl = '';
+  const step = Math.max(1, Math.floor(points.length / 6));
+  for (let i = 0; i < points.length; i += step) xl += `<text x="${xs(points[i].day)}" y="${H - 8}" class="axis" text-anchor="middle">${points[i].day.slice(5)}</text>`;
+  return `<svg viewBox="0 0 ${W} ${H}" class="chart" preserveAspectRatio="xMidYMid meet">${grid}
+    <path d="${line}" fill="none" stroke="var(--accent)" stroke-width="1.4" opacity=".55"/>${dots}${xl}</svg>`;
+}
+
 function emptyChart(msg) {
   return `<div class="chart-empty">${esc(msg)}</div>`;
 }
