@@ -29,7 +29,9 @@ export function fatigueSignals(pmc) {
 }
 
 // ---- daily readiness --------------------------------------------------------
-export function dailyReadiness(signals, weight, settings) {
+// `wellness` is today's self-reported entry ({fatigue 1-10, sleep hours,
+// soreness 1-10, stress 1-10}) — what you feel, folded in alongside the model.
+export function dailyReadiness(signals, weight, settings, wellness) {
   if (!signals) return { score: null, color: 'grey', reasons: ['No data yet'] };
   let score = 100;
   const reasons = [];
@@ -37,8 +39,19 @@ export function dailyReadiness(signals, weight, settings) {
   else if (signals.tsb < -10) { score -= 15; reasons.push(`Carrying fatigue (form ${signals.tsb.toFixed(0)})`); }
   if (signals.acwr > (settings.acwrHigh ?? 1.5)) { score -= 25; reasons.push(`Load spike (ACWR ${signals.acwr.toFixed(2)})`); }
   else if (signals.acwr && signals.acwr < (settings.acwrLow ?? 0.8) && signals.acute7 > 0) { score -= 8; reasons.push(`Load dropped (ACWR ${signals.acwr.toFixed(2)})`); }
-  if (signals.monotony > (settings.monotonyHigh ?? 2.0)) { score -= 15; reasons.push(`High monotony (${signals.monotony.toFixed(1)})`); }
-  if (weight && weight.dropPct7 > 1.5) { score -= 15; reasons.push(`Rapid weight loss (${weight.dropPct7.toFixed(1)}%/wk)`); }
+  if (signals.monotony > (settings.monotonyHigh ?? 2.5)) { score -= 10; reasons.push(`High monotony (${signals.monotony.toFixed(1)})`); }
+  if (weight && weight.dropPct7 > 1.5) { score -= 12; reasons.push(`Rapid weight loss (${weight.dropPct7.toFixed(1)}%/wk)`); }
+
+  const sw = settings.aiSubjectiveWeight ?? 1;
+  if (wellness && sw > 0) {
+    if (Number.isFinite(wellness.fatigue)) {
+      if (wellness.fatigue >= 7) { score -= Math.round((wellness.fatigue - 6) * 6 * sw); reasons.unshift(`You reported high fatigue (${wellness.fatigue}/10)`); }
+      else if (wellness.fatigue <= 3) { reasons.unshift(`You reported feeling fresh (${wellness.fatigue}/10)`); }
+    }
+    if (Number.isFinite(wellness.sleep) && wellness.sleep < 6) { score -= Math.round(6 * sw); reasons.push(`Short sleep (${wellness.sleep}h)`); }
+    if (Number.isFinite(wellness.soreness) && wellness.soreness >= 7) { score -= Math.round(5 * sw); reasons.push(`High soreness (${wellness.soreness}/10)`); }
+  }
+
   score = clamp(Math.round(score), 0, 100);
   const color = score >= 75 ? 'green' : score >= 50 ? 'amber' : 'red';
   if (!reasons.length) reasons.push('Fresh and balanced');
@@ -46,31 +59,33 @@ export function dailyReadiness(signals, weight, settings) {
 }
 
 // ---- adaptation pass --------------------------------------------------------
-function overloadReason(s, settings) {
+function overloadReason(s, settings, wellness) {
   const bits = [];
   if (s.tsb < settings.tsbDeepFatigue) bits.push(`form ${s.tsb.toFixed(0)}`);
   if (s.acwr > (settings.acwrHigh ?? 1.5)) bits.push(`ACWR ${s.acwr.toFixed(2)}`);
-  if (s.monotony > (settings.monotonyHigh ?? 2.0)) bits.push(`monotony ${s.monotony.toFixed(1)}`);
+  if (wellness && Number.isFinite(wellness.fatigue) && wellness.fatigue >= 8) bits.push(`reported fatigue ${wellness.fatigue}/10`);
   return `You're overreaching (${bits.join(', ')}) — easing the hardest upcoming sessions.`;
 }
 
-export function adaptationSuggestions(plan, signals, settings) {
+export function adaptationSuggestions(plan, signals, settings, wellness) {
   const today = dayKey(new Date());
   const horizon = addDays(today, settings.adaptHorizonDays ?? 7);
   const upcoming = (plan.sessions || []).filter(s => s.date >= today && s.date <= horizon && (s.targetLoad || 0) > 0);
   if (!signals || !upcoming.length) return { state: 'ontrack', changes: [], signals };
 
-  // Overload cuts load only on form/ACWR. High monotony is a "add variety" nudge
-  // (surfaced in readiness and advisories), not a reason to reduce volume.
+  // Overload cuts load on form/ACWR, or when you report very high fatigue today.
+  // High monotony is an "add variety" nudge, not a reason to reduce volume.
+  const highSubjective = wellness && Number.isFinite(wellness.fatigue) && wellness.fatigue >= 8;
   const overload = signals.tsb < settings.tsbDeepFatigue
-    || signals.acwr > (settings.acwrHigh ?? 1.5);
+    || signals.acwr > (settings.acwrHigh ?? 1.5)
+    || highSubjective;
   const detrain = signals.tsb > (settings.tsbVeryFresh ?? 15)
     && signals.acwr && signals.acwr < (settings.acwrLow ?? 0.8) && signals.acute7 > 0;
 
   const changes = [];
   if (overload) {
     const cut = settings.adaptCutPct ?? 0.6;
-    const reason = overloadReason(signals, settings);
+    const reason = overloadReason(signals, settings, wellness);
     const sorted = [...upcoming].sort((a, b) => (b.targetLoad || 0) - (a.targetLoad || 0));
     for (const s of sorted.slice(0, 2)) {
       changes.push({

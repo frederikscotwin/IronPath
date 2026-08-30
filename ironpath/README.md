@@ -1,6 +1,6 @@
 # IronPath
 
-A personal triathlon training app — plan, log, and analyze your road to an Ironman. It runs entirely on your device as an installable PWA, holds your own data, and the analytics are transparent: every number comes from a formula you can read and retune in Settings. It tracks your weight and turns it into energy expenditure (blendable with TRIMP as the load basis), estimates your thresholds and zones from your best sustained efforts, calibrates its fatigue/form model to your data, predicts race times and readiness, adapts your plan to your fatigue, plans your taper and race-day pacing/fuelling, and exports structured workouts to your Garmin. And it does the thing the big apps won't — it exports a clean, structured snapshot of your training that you can hand to an AI for coaching advice.
+A personal triathlon training app — plan, log, and analyze your road to an Ironman. It runs entirely on your device as an installable PWA, holds your own data, and the analytics are transparent: every number comes from a formula you can read and retune in Settings. It tracks your weight and turns it into energy expenditure (blendable with TRIMP as the load basis), estimates your thresholds and zones from your best sustained efforts, calibrates its fatigue/form model to your data, predicts race times and readiness, adapts your plan to your fatigue, plans your taper and race-day pacing/fuelling, and exports structured workouts to your Garmin. And it has an in-app AI coach — chat that reads your real numbers and, with your approval, edits your plan, logs your fatigue, and keeps a journal — running against any OpenAI-compatible endpoint (cloud or local) or an on-device model.
 
 Built as vanilla JavaScript with **no build step and no runtime dependencies** — nothing loads from a CDN, so it works fully offline and is yours to extend.
 
@@ -109,6 +109,23 @@ From the session streams the app computes **aerobic decoupling** — how much yo
 
 Every planned session has a **⌚ export**: it generates a structured workout (warm-up, main set — intervals for hard sessions, steady otherwise, with HR targets from your threshold — and cool-down) and exports it as a **Garmin FIT workout file** you import in Garmin Connect → Workouts, plus JSON and plain-text fallbacks. The encoder is round-trip-validated by the app's own decoder; check your first real import. A **test scheduler** (Setup) reminds you to run a benchmark TT every few weeks so your thresholds stay fresh.
 
+## The in-app AI coach
+
+The **AI Coach** tab is a real chat, not just an export. It works two ways, set in **Setup → AI coach**:
+
+- **Cloud (any OpenAI-compatible endpoint).** Put a base URL, model name and (if needed) an API key. That covers OpenAI, OpenRouter, Groq, Anthropic's compatible endpoint, or a **local server** like Ollama/LM Studio at `http://localhost:11434/v1`. Because the app is static, the browser calls the endpoint directly; your key is stored only on your device and sent only to that endpoint.
+- **On-device (WebLLM).** A small model runs in the browser via WebGPU — no key, no cost, fully private. Big one-time download, needs a WebGPU-capable browser, and small models are shakier at the plan-editing actions.
+
+Each turn the coach is given a compact snapshot of your training (fitness/fatigue/form, readiness, thresholds, recent load, upcoming plan, recent wellness and journal). It answers as a coach, and when you ask it to change something it proposes concrete edits through a structured actions protocol — **which you approve before anything is written**. It can touch your **journal, daily wellness, plan sessions, and thresholds** (each gated by a per-scope toggle; thresholds still route through the normal Accept step). Say *"slept badly, legs are toast, ease this week"* and it logs the fatigue, eases the hardest upcoming sessions, and notes it in your journal — all shown as a diff you accept or dismiss. A **Journal** the coach reads and writes to lives on the same tab, so it remembers what you've told it across days. If you'd rather not wire up an engine, the manual copy/download export is still there.
+
+## Perceived fatigue and effort
+
+The **Log** tab has a daily **check-in** — perceived fatigue (1–10), sleep hours, soreness — that folds straight into the readiness light and the plan adaptation, so what you *feel* actually moves the plan (report fatigue 8+ and it eases your week even if the model looks fine). Any session can carry an **RPE**; Strava's own perceived-exertion comes in automatically (below).
+
+## Richer Strava detail
+
+The summary sync gives the basics; **Enrich from Strava** (Log tab) then pulls each synced activity's **detailed** fields — perceived exertion (used as RPE), description, private note, relative effort, calories — plus the full streams for best-efforts and decoupling. It's rate-limited to a handful per click to stay within Strava's API limits.
+
 ## Project layout
 
 ```
@@ -124,6 +141,8 @@ js/
   adapt.js            fatigue signals (ACWR/monotony), readiness, plan adaptation
   race.js             race-day pacing + fuelling
   fitworkout.js       structured workout + Garmin FIT workout encoder/decoder
+  aicoach.js          in-app AI coach: context, actions protocol, apply-with-approval
+  webllm.js           optional on-device model (WebGPU) engine
   parsers.js          FIT / TCX / GPX import + stream metrics (best efforts, decoupling, GAP)
   charts.js           dependency-free SVG charts
   strava.js           Strava fetch + token helpers
@@ -142,7 +161,8 @@ node tests/model.test.mjs      # core engine: TRIMP, energy, weight, PMC (29 ass
 node tests/estimate.test.mjs   # estimation, impulse-response fit recovery, prediction (31)
 node tests/streams.test.mjs    # mean-max, FIT record decode, combined basis, best-effort estimation (20)
 node tests/coach2.test.mjs     # fatigue signals, adaptation, taper, race plan, decoupling/GAP, FIT workout (28)
-node tests/browser.mjs         # headless import + weight/tests + plan/taper/workout + screenshots
+node tests/ai.test.mjs         # AI actions parse/apply, scope gating, wellness->readiness (21)
+node tests/browser.mjs         # headless: import, plan/taper/workout, wellness, AI chat→approve (mock endpoint)
 ```
 
 `tests/generate_samples.py` regenerates the sample `.tcx`/`.gpx`/`.fit` files (the `.fit` is produced by an independent encoder to validate the binary decoder).

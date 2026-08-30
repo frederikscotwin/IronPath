@@ -11,8 +11,10 @@ import * as PL from './plan.js';
 import * as A from './adapt.js';
 import { racePlan } from './race.js';
 import { buildWorkoutFit, generateWorkoutFromSession, workoutToText } from './fitworkout.js';
-import { fetchStravaStreams } from './strava.js';
+import { fetchStravaStreams, fetchStravaDetail } from './strava.js';
 import { buildAiPayload, buildPrompt } from './aiexport.js';
+import * as AI from './aicoach.js';
+import * as WL from './webllm.js';
 
 const SPORTS = ['swim', 'bike', 'run', 'strength', 'other'];
 const SPORT_COLORS = {
@@ -21,15 +23,17 @@ const SPORT_COLORS = {
 };
 function getVar(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim() || '#888'; }
 
-const state = { settings: null, activities: [], plan: null, weights: [], tests: [], pmc: [], est: null, tab: 'home' };
+const state = { settings: null, activities: [], plan: null, weights: [], tests: [], wellness: [], journal: [], chat: [], pmc: [], est: null, tab: 'home' };
+
+function todayWellness() { const k = M.dayKey(new Date()); return state.wellness.find(w => w.date === k) || null; }
 
 // ---- boot -------------------------------------------------------------------
 
 init();
 async function init() {
   try {
-    [state.settings, state.activities, state.plan, state.weights, state.tests] = await Promise.all([
-      store.getSettings(), store.getAllActivities(), store.getPlan(), store.getAllWeights(), store.getAllTests(),
+    [state.settings, state.activities, state.plan, state.weights, state.tests, state.wellness, state.journal] = await Promise.all([
+      store.getSettings(), store.getAllActivities(), store.getPlan(), store.getAllWeights(), store.getAllTests(), store.getAllWellness(), store.getAllJournal(),
     ]);
   } catch (e) {
     document.getElementById('view').innerHTML = `<div class="card"><h3>Storage error</h3><p>${e.message}</p><p class="muted">IronPath needs IndexedDB. If you're in private browsing, try a normal window.</p></div>`;
@@ -115,7 +119,7 @@ function renderHome() {
   const today = state.pmc.filter(p => !p.isFuture).slice(-1)[0];
   const sug = M.suggestions(state.pmc, state.settings, state.plan);
   const signals = A.fatigueSignals(state.pmc);
-  const readiness = A.dailyReadiness(signals, M.weightTrend(state.weights), state.settings);
+  const readiness = A.dailyReadiness(signals, M.weightTrend(state.weights), state.settings, todayWellness());
   const readyChip = signals ? `<div class="card ready-${readiness.color}"><div class="spread">
     <div style="display:flex;gap:11px;align-items:center"><span class="ready-dot ${readiness.color}"></span>
       <div><div style="font-weight:700">Readiness ${readiness.score}<span class="muted" style="font-weight:400"> / 100</span></div>
@@ -167,7 +171,7 @@ function sessRow(a) {
   return `<div class="sess" data-id="${a.id}" data-action="openSess">
     <span class="dot" style="background:${SPORT_COLORS[a.sport]}"></span>
     <div class="meta"><div class="t">${a.name || cap(a.sport)} <span class="pill">${a.sport}</span></div>
-      <div class="d">${fmtDate(a.startTime)} · ${fmtDur(a.durationSec)}${a.distanceM ? ' · ' + fmtDist(a) : ''}${a.avgHr ? ' · ' + a.avgHr + ' bpm' : ''}${paceStr(a) ? ' · ' + paceStr(a) : ''}</div></div>
+      <div class="d">${fmtDate(a.startTime)} · ${fmtDur(a.durationSec)}${a.distanceM ? ' · ' + fmtDist(a) : ''}${a.avgHr ? ' · ' + a.avgHr + ' bpm' : ''}${paceStr(a) ? ' · ' + paceStr(a) : ''}${a.rpe ? ' · RPE ' + a.rpe : ''}</div></div>
     <div class="load"><b>${Math.round(load)}</b>load</div>
   </div>`;
 }
@@ -195,11 +199,28 @@ function renderLog() {
       <button class="btn primary" data-action="import">Import .fit / .tcx / .gpx</button>
       <button class="btn" data-action="add">Add session</button>
       <button class="btn ghost" data-action="strava">Sync Strava</button>
-      <button class="btn ghost" data-action="stravaStreams">Fetch Strava streams</button>
-    </div><p class="field-note">FIT and TCX carry full summaries and streams (best efforts, decoupling). GPX has no sport tag — set it after import. "Fetch Strava streams" pulls the detailed series for synced activities.</p></div>
+      <button class="btn ghost" data-action="stravaStreams">Enrich from Strava</button>
+    </div><p class="field-note">FIT and TCX carry full summaries and streams (best efforts, decoupling). GPX has no sport tag — set it after import. "Enrich from Strava" pulls each synced activity's perceived effort, description, notes and detailed streams.</p></div>
     ${weightSection()}
+    ${wellnessSection()}
     ${testSection()}
     ${list}`;
+}
+
+function wellnessSection() {
+  const today = M.dayKey(new Date());
+  const cur = state.wellness.find(w => w.date === today) || {};
+  const recent = [...state.wellness].sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
+  return `<div class="card"><h3>Daily check-in</h3>
+    <div class="row-3">
+      <div><label>Fatigue (1–10)</label><input id="wl_fatigue" type="number" min="1" max="10" value="${cur.fatigue ?? ''}" placeholder="10 = wrecked"></div>
+      <div><label>Sleep (h)</label><input id="wl_sleep" type="number" step="0.5" value="${cur.sleep ?? ''}" placeholder="hours"></div>
+      <div><label>Soreness (1–10)</label><input id="wl_soreness" type="number" min="1" max="10" value="${cur.soreness ?? ''}"></div>
+    </div>
+    <label>Note (optional)</label><input id="wl_note" value="${escapeAttr(cur.note || '')}" placeholder="how you feel today">
+    <div class="card-actions"><button class="btn primary" data-action="saveWellness">Save today's check-in</button></div>
+    ${recent.length ? `<div class="stack" style="margin-top:10px">${recent.map(w => `<div class="sess"><div class="meta"><div class="t">${fmtDate(w.date + 'T12:00')}</div><div class="d">${['fatigue', 'sleep', 'soreness', 'stress'].filter(k => w[k] != null).map(k => `${k} ${w[k]}`).join(' · ')}${w.note ? ' · ' + escapeHtml(w.note) : ''}</div></div><button class="btn sm ghost" data-action="delWellness" data-date="${w.date}">✕</button></div>`).join('')}</div>` : ''}
+    <p class="field-note">What you feel folds into the readiness light and the plan adaptation — and gives the AI coach real signal.</p></div>`;
 }
 
 function weightSection() {
@@ -252,7 +273,7 @@ function renderPlan() {
   }
   // Auto-regulation
   const signals = A.fatigueSignals(state.pmc);
-  const adapt = A.adaptationSuggestions(state.plan, signals, state.settings);
+  const adapt = A.adaptationSuggestions(state.plan, signals, state.settings, todayWellness());
   window.__adapt = adapt.changes;
   const autoAdapt = state.settings.autoAdaptApply;
   const toggle = `<label class="toggle"><input type="checkbox" data-action="toggleAutoAdapt" ${autoAdapt ? 'checked' : ''}> Auto-apply</label>`;
@@ -552,22 +573,41 @@ function energyStatsCard() {
 // ---- AI ---------------------------------------------------------------------
 
 function renderAi() {
+  const s = state.settings;
+  const configured = s.aiEngine === 'local' ? true : !!(s.aiBaseUrl && s.aiModel);
+  const engineLabel = s.aiEngine === 'local' ? `On-device · ${s.aiLocalModel.split('-').slice(0, 3).join('-')}` : (s.aiModel || 'not configured');
+
+  const chatMsgs = state.chat.map(m => `<div class="chat-msg ${m.role}"><div class="bubble">${m.role === 'assistant' ? mdLite(escapeHtml(m.content)) : escapeHtml(m.content)}</div></div>`).join('');
+  const pending = state.pendingActions;
+  const pendingCard = pending && pending.describe.length ? `<div class="card ready-amber"><h3>Proposed changes — your approval</h3>
+    ${pending.describe.map(d => `<div class="diff"><div><div class="d-title">${d.blocked ? '⚠︎ ' : ''}${escapeHtml(d.summary)}</div>${d.detail ? `<div class="d-sub">${escapeHtml(d.detail)}</div>` : ''}</div></div>`).join('')}
+    <div class="card-actions"><button class="btn primary" data-action="approveActions">Apply changes</button><button class="btn ghost" data-action="dismissActions">Dismiss</button></div></div>` : '';
+
+  const journalCard = `<div class="card"><div class="spread"><h3 style="margin:0">Journal</h3><button class="btn sm" data-action="addJournal">+ Note</button></div>
+    ${state.journal.length ? `<div class="stack" style="margin-top:8px">${state.journal.slice(0, 20).map(j => `<div class="sess"><div class="meta"><div class="t">${fmtDate((j.date || M.dayKey(new Date())) + 'T12:00')} ${j.source === 'ai' ? '<span class="pill">AI</span>' : ''}</div><div class="d">${escapeHtml(j.text)}</div></div><button class="btn sm ghost" data-action="delJournal" data-id="${j.id}">✕</button></div>`).join('')}</div>`
+      : '<p class="field-note">Your training journal — how sessions felt, life stress, niggles. The coach reads it and writes to it.</p>'}
+  </div>`;
+
   const payload = buildAiPayload(state.activities, state.settings, state.plan, state.weights, state.tests);
-  const prompt = buildPrompt(payload);
-  const preview = JSON.stringify(payload, null, 2);
-  window.__ai = { payload, prompt, preview };
-  const n = payload.sessions.length;
-  return `<h2 class="page-title">AI coach export</h2>
-    <div class="card"><div class="hint">This is the piece the big apps don't give you: a clean, structured snapshot of your training you can hand to an AI. Copy the prompt + data below into Claude and ask for recommendations grounded in your actual numbers.</div>
-      <div class="card-actions" style="margin-top:14px">
-        <button class="btn primary" data-action="copyPrompt">Copy prompt + data</button>
-        <button class="btn" data-action="copyJson">Copy JSON only</button>
-        <button class="btn ghost" data-action="dlJson">Download JSON</button>
-      </div>
-      <p class="field-note">${n} sessions · ${payload.dailyModelSeries.length} days of model history included.</p>
+  window.__ai = { payload, prompt: buildPrompt(payload), preview: JSON.stringify(payload, null, 2) };
+
+  return `<h2 class="page-title">AI Coach</h2>
+    <div class="card"><div class="spread"><span class="muted" style="font-size:12.5px">Engine: ${engineLabel}</span><button class="btn sm ghost" data-action="goto" data-tab="setup">Configure</button></div>
+      <div class="chat" id="chatBox">${chatMsgs || '<div class="chart-empty">Ask your coach anything, or tell it how you feel — e.g. "slept badly, legs are toast, ease this week" — and it can adjust your plan (you approve first).</div>'}</div>
+      ${state.aiBusy ? '<div class="muted" style="font-size:13px;padding:8px 2px">Coach is thinking…</div>' : ''}
+      <div class="chat-input"><textarea id="chatInput" rows="2" placeholder="Message your coach…"></textarea><button class="btn primary" data-action="sendChat">Send</button></div>
+      ${!configured ? '<p class="field-note">Set up an engine first: Setup → AI coach (a cloud endpoint, or the on-device model).</p>' : ''}
+      ${state.chat.length ? '<div class="card-actions"><button class="btn sm ghost" data-action="clearChat">Clear chat</button></div>' : ''}
     </div>
-    <div class="card"><h3>The prompt</h3><pre class="export">${escapeHtml(prompt.split('```json')[0].trim())}\n\n[ …followed by your ${(preview.length/1024).toFixed(0)} KB JSON export… ]</pre></div>
-    <div class="card"><h3>Data preview</h3><pre class="export">${escapeHtml(preview.slice(0, 2400))}${preview.length > 2400 ? '\n…' : ''}</pre></div>`;
+    ${pendingCard}
+    ${journalCard}
+    <div class="card"><h3>Manual export (fallback)</h3><p class="field-note" style="margin-top:0">No engine set up? Copy your data into any AI by hand.</p>
+      <div class="card-actions"><button class="btn" data-action="copyPrompt">Copy prompt + data</button><button class="btn ghost" data-action="dlJson">Download JSON</button></div></div>`;
+}
+
+// tiny, safe markdown: input must already be HTML-escaped
+function mdLite(escaped) {
+  return escaped.replace(/\*\*([^*]+)\*\*/g, '<b>$1</b>').replace(/\n/g, '<br>');
 }
 
 // ---- SETUP ------------------------------------------------------------------
@@ -644,6 +684,20 @@ function renderSetup() {
       </div>
       <p class="field-note">ACWR &gt; high or form below your deep-fatigue line eases the next hard sessions; high monotony is a "add variety" nudge, not a cut.</p>
     </div>
+    <div class="card"><h3>AI coach</h3>
+      <label>Engine</label>
+      <select id="s_aiengine"><option value="cloud" ${s.aiEngine === 'cloud' ? 'selected' : ''}>Cloud endpoint (OpenAI-compatible)</option><option value="local" ${s.aiEngine === 'local' ? 'selected' : ''}>On-device (WebLLM, WebGPU)</option></select>
+      <label>Endpoint base URL <span class="muted">(cloud)</span></label>
+      <input id="s_aibase" value="${escapeAttr(s.aiBaseUrl)}" placeholder="https://openrouter.ai/api/v1 · http://localhost:11434/v1">
+      <div class="row"><div><label>Model</label><input id="s_aimodel" value="${escapeAttr(s.aiModel)}" placeholder="e.g. gpt-4o-mini"></div>
+        <div><label>API key <span class="muted">(if needed)</span></label><input id="s_aikey" type="password" value="${escapeAttr(s.aiApiKey)}" placeholder="stored on device only"></div></div>
+      <label>On-device model <span class="muted">(WebLLM id)</span></label>
+      <input id="s_ailocal" value="${escapeAttr(s.aiLocalModel)}">
+      <label style="margin-top:12px">The coach may edit (each still needs your approval)</label>
+      <div class="chips" id="aiScopes">${['journal', 'wellness', 'plan', 'thresholds'].map(k => `<span class="chip" data-action="toggleScope" data-scope="${k}" aria-pressed="${!!(s.aiScopes && s.aiScopes[k])}">${cap(k)}</span>`).join('')}</div>
+      <label>Perceived-fatigue weight in readiness</label><input id="s_subj" type="number" step="0.5" value="${s.aiSubjectiveWeight ?? 1}">
+      <p class="field-note">Cloud works with any OpenAI-compatible API (OpenRouter, Groq, OpenAI, or a local Ollama/LM Studio server). On-device runs a small model in the browser via WebGPU — big first download, no key, fully private. Your key stays on this device and is sent only to your chosen endpoint.</p>
+    </div>
     <div class="card"><h3>Strava</h3>
       <label>Access token <span class="muted">(paste a personal token; see README for auto-refresh)</span></label>
       <input id="s_strava" value="${escapeAttr(s.stravaAccessToken)}" placeholder="paste Strava access token">
@@ -709,7 +763,72 @@ const ACTIONS = {
   genTaper: () => genTaper(),
   exportWorkout: (t) => { const s = state.plan.sessions.find(x => x.id === t.closest('.psess').dataset.id); if (s) openWorkoutModal(s); },
   stravaStreams: () => fetchStravaStreamsForRecent(),
+  saveWellness: () => saveWellness(),
+  delWellness: async (t) => { await store.deleteWellness(t.dataset.date); state.wellness = await store.getAllWellness(); recompute(); render(); },
+  sendChat: () => sendChat(),
+  clearChat: () => { state.chat = []; state.pendingActions = null; render(); },
+  approveActions: () => approveActions(),
+  dismissActions: () => { state.pendingActions = null; render(); },
+  addJournal: () => addJournalPrompt(),
+  delJournal: async (t) => { await store.deleteJournalEntry(t.dataset.id); state.journal = await store.getAllJournal(); render(); },
+  toggleScope: (t) => { t.setAttribute('aria-pressed', t.getAttribute('aria-pressed') !== 'true'); },
 };
+
+async function saveWellness() {
+  const today = M.dayKey(new Date());
+  const e = { ...(state.wellness.find(w => w.date === today) || {}), date: today };
+  const f = intOrNull(val('wl_fatigue')); const sl = parseFloat(val('wl_sleep')); const so = intOrNull(val('wl_soreness'));
+  if (f != null) e.fatigue = Math.max(1, Math.min(10, f));
+  if (Number.isFinite(sl)) e.sleep = sl;
+  if (so != null) e.soreness = Math.max(1, Math.min(10, so));
+  e.note = val('wl_note').trim();
+  await store.putWellness(e); state.wellness = await store.getAllWellness();
+  recompute(); render(); toast("Today's check-in saved.", 'ok');
+}
+
+async function sendChat() {
+  const inp = document.getElementById('chatInput'); const msg = (inp?.value || '').trim(); if (!msg) return;
+  const s = state.settings;
+  const ready = s.aiEngine === 'local' ? WL.webgpuAvailable() : (s.aiBaseUrl && s.aiModel);
+  if (!ready) { toast(s.aiEngine === 'local' ? 'No WebGPU here — use a cloud endpoint.' : 'Configure an AI endpoint in Setup first.', 'err'); state.tab = 'setup'; render(); return; }
+  state.chat.push({ role: 'user', content: msg }); state.aiBusy = true; render();
+  try {
+    const ctx = AI.buildContext(state);
+    const history = state.chat.slice(0, -1).slice(-8);
+    const messages = AI.buildMessages(ctx, history, msg, s);
+    const raw = s.aiEngine === 'local'
+      ? await WL.chatLocal(s.aiLocalModel, messages, (p) => { const b = document.getElementById('chatBox'); if (b && p && p.text) b.dataset.progress = p.text; })
+      : await AI.chatCloud(s, messages);
+    const { reply, actions } = AI.parseActions(raw);
+    state.chat.push({ role: 'assistant', content: reply || '(no reply)' });
+    if (actions.length) state.pendingActions = { actions, describe: AI.describeActions(actions, state) };
+  } catch (e) {
+    state.chat.push({ role: 'assistant', content: '⚠︎ ' + e.message });
+  }
+  state.aiBusy = false; render();
+  setTimeout(() => { const b = document.getElementById('chatBox'); if (b) b.scrollTop = b.scrollHeight; }, 60);
+}
+
+async function approveActions() {
+  const p = state.pendingActions; if (!p) return;
+  const out = AI.applyActions(p.actions, state);
+  await store.savePlan(out.plan); await store.saveSettings(out.settings);
+  for (const w of out.wellnessUpserts) await store.putWellness(w);
+  for (const j of out.journalAdds) await store.putJournalEntry(j);
+  [state.settings, state.plan, state.wellness, state.journal] = await Promise.all([store.getSettings(), store.getPlan(), store.getAllWellness(), store.getAllJournal()]);
+  state.pendingActions = null; recompute(); render();
+  toast(`Applied: ${out.summary.join('; ') || 'changes'}.`, 'ok');
+}
+
+function addJournalPrompt() {
+  const { back, modal } = openModal(`<h3>New journal note</h3><textarea id="jn_text" rows="4" placeholder="How did it go? How do you feel?"></textarea><div class="card-actions" style="margin-top:12px"><button class="btn primary" id="jn_save">Save</button><button class="btn ghost" id="jn_cancel">Cancel</button></div>`);
+  modal.querySelector('#jn_cancel').onclick = () => back.remove();
+  modal.querySelector('#jn_save').onclick = async () => {
+    const t = modal.querySelector('#jn_text').value.trim(); if (!t) { back.remove(); return; }
+    await store.putJournalEntry({ id: 'j' + Date.now().toString(36), date: M.dayKey(new Date()), text: t, tags: [], source: 'user' });
+    state.journal = await store.getAllJournal(); back.remove(); render(); toast('Note saved.', 'ok');
+  };
+}
 
 async function acceptAdapt() {
   const changes = window.__adapt || [];
@@ -727,7 +846,7 @@ async function toggleAutoAdapt(on) {
 async function applyPendingAdapt() {
   if (!state.settings.autoAdaptApply) return;
   const signals = A.fatigueSignals(state.pmc);
-  const adapt = A.adaptationSuggestions(state.plan, signals, state.settings);
+  const adapt = A.adaptationSuggestions(state.plan, signals, state.settings, todayWellness());
   if (adapt.changes.length) {
     state.plan = A.applyAdaptation(state.plan, adapt.changes);
     await store.savePlan(state.plan); recompute();
@@ -744,17 +863,24 @@ async function genTaper() {
 async function fetchStravaStreamsForRecent() {
   const token = state.settings.stravaAccessToken;
   if (!token) { toast('Add a Strava token in Setup first.', 'err'); state.tab = 'setup'; render(); return; }
-  const targets = state.activities.filter(a => a.source === 'strava' && a.stravaId && !a.best)
+  const targets = state.activities.filter(a => a.source === 'strava' && a.stravaId && !a.enriched)
     .sort((x, y) => y.startTime.localeCompare(x.startTime)).slice(0, 15);
-  if (!targets.length) { toast('No Strava activities need streams.'); return; }
-  toast(`Fetching streams for ${targets.length}…`);
+  if (!targets.length) { toast('Strava activities already enriched.'); return; }
+  toast(`Enriching ${targets.length} from Strava…`);
   let done = 0;
   for (const a of targets) {
-    try { const m = await fetchStravaStreams(token, a.stravaId, a.sport); if (m) { await store.updateActivity({ ...a, best: m.best, decoupling: m.decoupling, gapBest: m.gapBest }); done++; } }
-    catch (e) { toast(e.message, 'err'); break; }
+    try {
+      const upd = { ...a };
+      const detail = await fetchStravaDetail(token, a.stravaId).catch(() => null);
+      if (detail) { if (detail.perceivedExertion != null) upd.rpe = detail.perceivedExertion; upd.description = detail.description; upd.privateNote = detail.privateNote; upd.relativeEffort = detail.relativeEffort; if (detail.calories) upd.calories = detail.calories; upd.gear = detail.gear; }
+      const m = await fetchStravaStreams(token, a.stravaId, a.sport).catch(() => null);
+      if (m) { upd.best = m.best; upd.decoupling = m.decoupling; upd.gapBest = m.gapBest; }
+      upd.enriched = true;
+      await store.updateActivity(upd); done++;
+    } catch (e) { toast(e.message, 'err'); break; }
   }
   state.activities = await store.getAllActivities(); recompute(); render();
-  toast(`Enriched ${done} activities with stream data.`, 'ok');
+  toast(`Enriched ${done} activities (effort, notes, streams).`, 'ok');
 }
 
 function openWorkoutModal(session) {
@@ -921,6 +1047,11 @@ async function saveSettings() {
   s.adaptCutPct = clamp01((parseFloat(val('s_cut')) || 60) / 100); s.taperWeeks = numv('s_taper') || 3;
   s.testIntervalWeeks = numv('s_testiv') || 6;
   s.fuelCarbsPerHr = numv('s_carbs') || 80; s.fuelFluidMlPerHr = numv('s_fluid') || 600; s.fuelSodiumMgPerHr = numv('s_sodium') || 700;
+  s.aiEngine = val('s_aiengine') || 'cloud'; s.aiBaseUrl = val('s_aibase').trim(); s.aiModel = val('s_aimodel').trim();
+  s.aiApiKey = val('s_aikey').trim(); s.aiLocalModel = val('s_ailocal').trim() || s.aiLocalModel;
+  s.aiSubjectiveWeight = Number.isFinite(parseFloat(val('s_subj'))) ? parseFloat(val('s_subj')) : 1;
+  const scopeEls = document.querySelectorAll('#aiScopes [data-scope]');
+  if (scopeEls.length) { const sc = {}; scopeEls.forEach(el => sc[el.dataset.scope] = el.getAttribute('aria-pressed') === 'true'); s.aiScopes = sc; }
   s.stravaAccessToken = val('s_strava').trim();
   state.settings = s;
   await store.saveSettings(s);
