@@ -40,7 +40,7 @@ Three ways, all landing in the same normalized store:
    - `.gpx` — has no sport tag either; set it after import.
    To pull your whole history at once, use Garmin's bulk export or Strava's "Download your data", then import the files.
 
-2. **Strava sync**. In **Setup → Strava**, paste a personal Access Token, then *Sync Strava* on the Log tab. Since Garmin auto-pushes to Strava, this also captures your Garmin activities. Strava tokens expire after ~6 hours; for hands-off refresh, deploy `server/strava-oauth.js` (it keeps your client secret off the browser) and wire its URL into `js/strava.js` → `refreshViaProxy`.
+2. **Strava sync**. In **Setup → Strava**, paste a personal Access Token, then *Sync Strava* on the Log tab. Since Garmin auto-pushes to Strava, this also captures your Garmin activities. Strava access tokens expire after ~6 hours, so for hands-off sync there's a built-in **auto-refresh**: deploy the tiny `server/strava-oauth.js` function (it keeps your client secret off the browser), then put its URL and your refresh token in Setup → Strava → *Auto-refresh*. The app fetches a fresh token itself before each sync — you never re-paste. Full setup in `DEPLOY.md`.
 
 3. **Manual entry**. *Add session* on Home or Log — sport, duration, distance, HR, RPE, notes.
 
@@ -116,7 +116,11 @@ The **AI Coach** tab is a real chat, not just an export. It works two ways, set 
 - **Cloud (any OpenAI-compatible endpoint).** Put a base URL, model name and (if needed) an API key. That covers OpenAI, OpenRouter, Groq, Anthropic's compatible endpoint, or a **local server** like Ollama/LM Studio at `http://localhost:11434/v1`. Because the app is static, the browser calls the endpoint directly; your key is stored only on your device and sent only to that endpoint.
 - **On-device (WebLLM).** A small model runs in the browser via WebGPU — no key, no cost, fully private. Big one-time download, needs a WebGPU-capable browser, and small models are shakier at the plan-editing actions.
 
-Each turn the coach is given a compact snapshot of your training (fitness/fatigue/form, readiness, thresholds, recent load, upcoming plan, recent wellness and journal). It answers as a coach, and when you ask it to change something it proposes concrete edits through a structured actions protocol — **which you approve before anything is written**. It can touch your **journal, daily wellness, plan sessions, and thresholds** (each gated by a per-scope toggle; thresholds still route through the normal Accept step). Say *"slept badly, legs are toast, ease this week"* and it logs the fatigue, eases the hardest upcoming sessions, and notes it in your journal — all shown as a diff you accept or dismiss. A **Journal** the coach reads and writes to lives on the same tab, so it remembers what you've told it across days. If you'd rather not wire up an engine, the manual copy/download export is still there.
+Each turn the coach is given a compact snapshot of your training (fitness/fatigue/form, readiness, thresholds, recent load, upcoming plan, recent wellness and journal, and any active recovery events). It answers as a coach, and when you ask it to change something it proposes concrete edits through a structured actions protocol — **which you approve before anything is written**. It can touch your **journal, daily wellness, plan sessions, thresholds, and recovery events** (each gated by a per-scope toggle; thresholds still route through the normal Accept step). Say *"slept badly, legs are toast, ease this week"* and it logs the fatigue, eases the hardest upcoming sessions, and notes it in your journal — all shown as a diff you accept or dismiss. A **Journal** the coach reads and writes to lives on the same tab, so it remembers what you've told it across days. If you'd rather not wire up an engine, the manual copy/download export is still there.
+
+### How the coach influences your fitness and form
+
+Fitness (CTL) is computed from real training — it can't be fabricated, and the coach never sets it directly. What it *can* do is log a **recovery event** (a "modifier"): tell it *"I've come down with the flu"* and it judges a sensible recovery window and records an illness event with a severity and a duration. That event starts at full strength and **decays linearly to zero across the window**, knocking down your *effective* form and readiness while it's active and easing the hardest upcoming sessions — then fading out on its own as you recover. It covers **illness, injury, life stress, travel, and a subjective offset** (when you simply feel worse — or better — than the numbers show). If it's missing a detail it needs to size the window well (how many days, fever or not, hours slept) it asks **one short follow-up question** first and holds the change until you answer. Active events surface on the dashboard in a **Recovery & adjustments** card (clear any with ✕) and lead the "What the model is telling you" status, so *"how my training is going"* reflects real life, not just the load math. The coach revises or clears an event as you update it, and every set/clear still goes through your approval. Enable it with the **Recovery** scope toggle in Setup → AI coach.
 
 ## Perceived fatigue and effort
 
@@ -138,7 +142,7 @@ js/
   store.js            IndexedDB + settings/plan + JSON backup
   model.js            core analytics (TRIMP, energy, weight, PMC, suggestions) — pure, unit-tested
   estimate.js         threshold/zone estimation, self-calibration fit, prediction, durability
-  adapt.js            fatigue signals (ACWR/monotony), readiness, plan adaptation
+  adapt.js            fatigue signals (ACWR/monotony), readiness, plan adaptation, recovery modifiers
   race.js             race-day pacing + fuelling
   fitworkout.js       structured workout + Garmin FIT workout encoder/decoder
   aicoach.js          in-app AI coach: context, actions protocol, apply-with-approval
@@ -162,7 +166,9 @@ node tests/estimate.test.mjs   # estimation, impulse-response fit recovery, pred
 node tests/streams.test.mjs    # mean-max, FIT record decode, combined basis, best-effort estimation (20)
 node tests/coach2.test.mjs     # fatigue signals, adaptation, taper, race plan, decoupling/GAP, FIT workout (28)
 node tests/ai.test.mjs         # AI actions parse/apply, scope gating, wellness->readiness (21)
-node tests/browser.mjs         # headless: import, plan/taper/workout, wellness, AI chat→approve (mock endpoint)
+node tests/modifiers.test.mjs  # recovery events: decay math, readiness/adaptation, set/clear_modifier (38)
+node tests/strava.test.mjs     # hands-off token: refresh-decision logic + proxy exchange (12)
+node tests/browser.mjs         # headless: import, plan/taper/workout, wellness, AI chat→approve, illness→modifier (mock endpoint)
 ```
 
 `tests/generate_samples.py` regenerates the sample `.tcx`/`.gpx`/`.fit` files (the `.fit` is produced by an independent encoder to validate the binary decoder).

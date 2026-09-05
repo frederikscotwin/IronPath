@@ -10,14 +10,14 @@
 
 import { performanceChart, weeklyVolume, activityLoad, weightTrend, plannedDailyLoads } from './model.js';
 import { estimateThresholds, predict } from './estimate.js';
-import { fatigueSignals, dailyReadiness } from './adapt.js';
+import { fatigueSignals, dailyReadiness, modifierState } from './adapt.js';
 import { newSession, mondayOf } from './plan.js';
 
 const pace = (secPerUnit) => { if (!secPerUnit || !isFinite(secPerUnit)) return null; const m = Math.floor(secPerUnit / 60), s = Math.round(secPerUnit % 60); return `${m}:${String(s).padStart(2, '0')}`; };
 
 // ---- compact context the model sees each turn -------------------------------
 export function buildContext(state) {
-  const { activities, settings, plan, weights, tests, wellness, journal } = state;
+  const { activities, settings, plan, weights, tests, wellness, journal, modifiers } = state;
   const pmc = performanceChart(activities, settings, { weights, plannedDaily: plannedDailyLoads(plan, settings) });
   const today = pmc.filter(p => !p.isFuture).slice(-1)[0] || null;
   const est = estimateThresholds(activities, tests, settings);
@@ -25,7 +25,8 @@ export function buildContext(state) {
   const wt = weightTrend(weights);
   const todayKey = new Date().toISOString().slice(0, 10);
   const todayWellness = (wellness || []).find(w => w.date === todayKey) || null;
-  const readiness = dailyReadiness(sig, wt, settings, todayWellness);
+  const mods = modifierState(modifiers, todayKey);
+  const readiness = dailyReadiness(sig, wt, settings, todayWellness, mods);
   const pred = predict(activities, settings, weights, tests, pmc, est);
 
   return {
@@ -35,6 +36,8 @@ export function buildContext(state) {
     current: today ? { fitnessCTL: +today.ctl.toFixed(1), fatigueATL: +today.atl.toFixed(1), formTSB: +today.tsb.toFixed(1) } : null,
     fatigueSignals: sig ? { acwr: +sig.acwr.toFixed(2), monotony: +sig.monotony.toFixed(2) } : null,
     readiness: { score: readiness.score, reasons: readiness.reasons },
+    activeRecovery: mods.active.map(a => ({ id: a.id, type: a.type, severity: a.severity, dayOf: a.dayOf, totalDays: a.totalDays, note: a.note })),
+    formAdjustPoints: mods.points,
     weightKg: wt.smooth ? +wt.smooth.toFixed(1) : null,
     thresholds: {
       maxHr: settings.maxHr, restHr: settings.restHr, lthr: est.lthr.value,
@@ -66,6 +69,10 @@ To propose changes, end your reply with a fenced code block labelled ironpath-ac
 - {"type":"adjust_session","id":"<planSessionId>","targetLoadPct":0.6,"targetMinutes":45,"title":"..."}  (id from upcomingPlan; targetLoadPct scales the planned load; include only fields you change)
 - {"type":"add_session","date":"YYYY-MM-DD","sport":"swim|bike|run|strength","title":"...","targetMinutes":60,"reserve":0.65}
 - {"type":"suggest_threshold","field":"maxHr|restHr|lthr|ctlDays|atlDays|cssPacePer100mSec|runThresholdPacePerKmSec","value":number}
+- {"type":"set_modifier","modifierType":"illness|injury|stress|travel|fatigue_offset","date":"YYYY-MM-DD","severity":1-10,"durationDays":N,"note":"..."}  (a recovery/impact event whose duration you judge; it starts at full strength and decays to zero across durationDays, lowering effective form and readiness and easing the plan. Use fatigue_offset when the athlete feels worse — or better — than the model shows)
+- {"type":"clear_modifier","id":"<id from context.activeRecovery>"}
+
+Judgement and follow-ups: if you're missing a detail needed to size a change well (days ill, severity, fever, hours slept), ask ONE short follow-up question and do NOT emit an actions block until you have it. When the athlete reports illness or injury, set a set_modifier with a sensible recovery window you judge (rough guide: mild cold ~4–7 days, flu ~10–14, a muscle strain often longer) and revise or clear it as they update you. Fitness (CTL) is computed from real training and is never set directly — you influence it only through the plan, thresholds/constants, and these modifiers.
 
 Every action is shown to the athlete for approval before it is applied, so propose confidently but explain your reasoning in the reply text. Example ending:
 \`\`\`ironpath-actions
@@ -118,7 +125,7 @@ export function parseActions(text) {
 // ---- describe (for the approval UI) -----------------------------------------
 export function describeActions(actions, state) {
   const scopes = state.settings.aiScopes || {};
-  const scopeOf = { add_journal: 'journal', set_wellness: 'wellness', adjust_session: 'plan', add_session: 'plan', suggest_threshold: 'thresholds' };
+  const scopeOf = { add_journal: 'journal', set_wellness: 'wellness', adjust_session: 'plan', add_session: 'plan', suggest_threshold: 'thresholds', set_modifier: 'recovery', clear_modifier: 'recovery' };
   const out = [];
   for (const a of (actions || [])) {
     const scope = scopeOf[a.type];
@@ -132,6 +139,8 @@ export function describeActions(actions, state) {
       out.push({ type: a.type, summary: `Adjust ${s ? (s.title || s.sport) + ' ' + s.date.slice(5) : a.id}`, detail: `load ${from} → ${to}${a.title ? `, title "${a.title}"` : ''}` });
     } else if (a.type === 'add_session') out.push({ type: a.type, summary: `Add ${a.sport} session ${a.date}`, detail: `${a.title || ''} · ${a.targetMinutes || '?'} min` });
     else if (a.type === 'suggest_threshold') out.push({ type: a.type, summary: `Set ${a.field}`, detail: `→ ${a.value}` });
+    else if (a.type === 'set_modifier') out.push({ type: a.type, summary: `Log ${a.modifierType} (${a.date || 'today'})`, detail: `severity ${a.severity}/10, ~${a.durationDays} days${a.note ? ' — ' + a.note : ''}` });
+    else if (a.type === 'clear_modifier') out.push({ type: a.type, summary: `Clear recovery event`, detail: a.id });
     else out.push({ blocked: true, type: a.type, summary: `Unknown action ${a.type}` });
   }
   return out;
@@ -146,6 +155,8 @@ export function applyActions(actions, state) {
   let settings = { ...state.settings };
   const wellnessUpserts = [];
   const journalAdds = [];
+  const modifierUpserts = [];
+  const modifierDeletes = [];
   const summary = [];
   const today = new Date().toISOString().slice(0, 10);
 
@@ -182,7 +193,13 @@ export function applyActions(actions, state) {
       else if (f === 'cssPacePer100mSec' && v > 0) settings.cssSpeed = 100 / v;
       else if (f === 'runThresholdPacePerKmSec' && v > 0) settings.runThresholdSpeed = 1000 / v;
       summary.push(`${f} set to ${v}`);
+    } else if (a.type === 'set_modifier' && scopes.recovery) {
+      const type = a.modifierType || 'fatigue_offset';
+      modifierUpserts.push({ id: a.id || ('m' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)), date: a.date || today, type, severity: Math.max(1, Math.min(10, Number(a.severity) || 5)), durationDays: Math.max(1, Number(a.durationDays) || 7), note: a.note || '', source: 'ai' });
+      summary.push(`${type} logged`);
+    } else if (a.type === 'clear_modifier' && scopes.recovery) {
+      if (a.id) { modifierDeletes.push(a.id); summary.push('recovery event cleared'); }
     }
   }
-  return { plan, settings, wellnessUpserts, journalAdds, summary };
+  return { plan, settings, wellnessUpserts, journalAdds, modifierUpserts, modifierDeletes, summary };
 }

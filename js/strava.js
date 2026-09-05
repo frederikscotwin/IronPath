@@ -91,6 +91,14 @@ export async function fetchStravaDetail(token, id) {
   };
 }
 
+// Should we refresh the access token now? Only when a proxy + refresh token are
+// configured AND the current access token is missing or within `graceSec` of
+// expiry. Without a proxy we leave the manually-pasted token alone. Pure — unit-tested.
+export function stravaNeedsRefresh(settings, nowSec = Math.floor(Date.now() / 1000), graceSec = 120) {
+  if (!settings || !settings.stravaProxyUrl || !settings.stravaRefreshToken) return false;
+  return !(settings.stravaTokenExpiry && settings.stravaTokenExpiry - nowSec > graceSec);
+}
+
 // Optional: exchange an authorization code / refresh token via your serverless
 // proxy (so client secret never touches the browser). proxyUrl is your function.
 export async function refreshViaProxy(proxyUrl, refreshToken) {

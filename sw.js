@@ -1,5 +1,5 @@
 // sw.js — offline app shell. Bump CACHE when you change the shell files.
-const CACHE = 'ironpath-v6';
+const CACHE = 'ironpath-v8';
 const SHELL = [
   './',
   'index.html',

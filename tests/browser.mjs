@@ -17,8 +17,17 @@ const server = http.createServer(async (req, res) => {
     if (p === '/') p = '/index.html';
     if (p.startsWith('/mock/')) {
       let body = ''; req.on('data', c => body += c); req.on('end', () => {
+        const today = new Date().toISOString().slice(0, 10);
+        // Branch on the athlete's LAST user message (not the whole payload — the
+        // system prompt itself mentions "illness"), to exercise different actions.
+        let lastUser = '';
+        try { const j = JSON.parse(body); lastUser = [...(j.messages || [])].reverse().find(m => m.role === 'user')?.content || ''; } catch {}
+        const isIllness = /flu|sick|fever/i.test(lastUser);
+        const content = isIllness
+          ? "Sorry you're under the weather — rest is the priority. I'll log it with a recovery window and ease the plan; update me as it changes.\n\n```ironpath-actions\n[{\"type\":\"set_modifier\",\"modifierType\":\"illness\",\"date\":\"" + today + "\",\"severity\":7,\"durationDays\":12,\"note\":\"flu\"}]\n```"
+          : "Got it — noting that and easing off.\n\n```ironpath-actions\n[{\"type\":\"add_journal\",\"date\":\"" + today + "\",\"text\":\"AI test note\"}]\n```";
         res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-        res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content: "Got it — noting that and easing off.\n\n```ironpath-actions\n[{\"type\":\"add_journal\",\"date\":\"2026-08-30\",\"text\":\"AI test note\"}]\n```" } }] }));
+        res.end(JSON.stringify({ choices: [{ message: { role: 'assistant', content } }] }));
       });
       return;
     }
@@ -69,7 +78,7 @@ await page.evaluate(async (mockBase) => {
     s.raceDate = race.toISOString().slice(0, 10); s.raceName = 'Ironman Copenhagen'; s.age = 34;
     s.loadBasis = 'combined'; s.energyBlend = 0.5;
     s.aiEngine = 'cloud'; s.aiBaseUrl = mockBase; s.aiModel = 'mock';
-    s.aiScopes = { journal: true, wellness: true, plan: true, thresholds: true };
+    s.aiScopes = { journal: true, wellness: true, plan: true, thresholds: true, recovery: true };
     db.transaction('meta', 'readwrite').objectStore('meta').put({ key: 'settings', value: s });
     r();
   }; });
@@ -139,6 +148,33 @@ await page.click('[data-action="approveActions"]').catch(() => {});
 await page.waitForTimeout(400);
 const journalHasAi = await page.locator('.pill:has-text("AI")').count();
 
+// AI recovery modifier: report illness -> coach proposes set_modifier -> approve
+await tab('ai');
+await page.fill('#chatInput', "I've come down with the flu, feeling awful.");
+await page.click('[data-action="sendChat"]');
+await page.waitForTimeout(1000);
+const proposedMod = await page.locator('text=Log illness').count();
+await page.screenshot({ path: 'tests/shot_ai_illness.png' });
+await page.click('[data-action="approveActions"]').catch(() => {});
+await page.waitForTimeout(400);
+// modifier persisted?
+const nMods = await page.evaluate(async () => {
+  const db = await new Promise(res => { const r = indexedDB.open('ironpath'); r.onsuccess = () => res(r.result); });
+  return await new Promise(res => { const tx = db.transaction('modifiers').objectStore('modifiers').getAll(); tx.onsuccess = () => res(tx.result.length); });
+});
+// home shows the recovery card + the status feeds the "what the model is telling you" section
+await tab('home');
+const recoveryCard = await page.locator('text=Recovery & adjustments').count();
+const statusRecovering = await page.locator('text=Recovering from illness').count();
+await page.screenshot({ path: 'tests/shot_home_recovery.png' });
+// clear it from the home card
+await page.click('[data-action="delModifier"]').catch(() => {});
+await page.waitForTimeout(400);
+const nModsAfterClear = await page.evaluate(async () => {
+  const db = await new Promise(res => { const r = indexedDB.open('ironpath'); r.onsuccess = () => res(r.result); });
+  return await new Promise(res => { const tx = db.transaction('modifiers').objectStore('modifiers').getAll(); tx.onsuccess = () => res(tx.result.length); });
+});
+
 const nSess = await page.evaluate(async () => {
   const db = await new Promise(res => { const r = indexedDB.open('ironpath'); r.onsuccess = () => res(r.result); });
   return await new Promise(res => { const tx = db.transaction('activities').objectStore('activities').getAll(); tx.onsuccess = () => res(tx.result.length); });
@@ -151,11 +187,13 @@ console.log('setup auto-regulation card:', !!hasAutoReg);
 console.log('AI export has raceDayPlan + new fields:', aiOk);
 console.log('wellness->readiness reason shown:', !!readinessAfterWellness);
 console.log('AI chat: assistant reply', !!hasAssistant, '| proposed-changes card', !!hasProposed, '| applied AI journal entry', !!journalHasAi);
+console.log('AI recovery: proposed set_modifier', !!proposedMod, '| persisted', nMods, '| home recovery card', !!recoveryCard, '| status "Recovering"', !!statusRecovering, '| cleared ->', nModsAfterClear);
 console.log('errors:', errors.length ? errors : 'none');
 
 await browser.close();
 server.close();
 const failed = errors.length || nSess < 80 || !hasPred || !hasReady || !hasCal || !hasEst
   || !hasBest || !hasRace || !hasDur || !hasReadyChip || !hasWorkoutModal || !hasAutoReg || !aiOk
-  || !hasAssistant || !hasProposed || !journalHasAi || !readinessAfterWellness;
+  || !hasAssistant || !hasProposed || !journalHasAi || !readinessAfterWellness
+  || !proposedMod || nMods !== 1 || !recoveryCard || !statusRecovering || nModsAfterClear !== 0;
 process.exit(failed ? 1 : 0);

@@ -41,6 +41,43 @@ Keep the **same URL** forever. Data is tied to the origin, so a stable URL means
 everyone keeps their history across updates; a new URL would look like a brand-new
 app with empty memory (migrate via Export/Import backup if that ever happens).
 
+## Hands-off Strava sync (never re-paste a token)
+
+Strava **access tokens expire after ~6 hours** — even more often than daily — so a
+token pasted into Setup stops working the same day. The fix is a tiny function that
+holds your Strava *client secret* and trades a long-lived *refresh token* for a fresh
+access token on demand. The app on GitHub Pages can't run this itself (Pages serves
+static files only), so it lives on a free host that runs code. Two moving parts:
+your app stays where it is; the function is a separate micro-service the app calls.
+
+`server/strava-oauth.js` is that function. Easiest host is **Vercel** (the file is
+already written as a Vercel handler):
+
+1. **Get your Strava app credentials.** strava.com/settings/api → note the
+   **Client ID** and **Client Secret**. Set the app's *Authorization Callback Domain*
+   to `localhost` (only used for the one-time authorize below).
+2. **Deploy the function to Vercel.** Easiest: put `server/strava-oauth.js` at
+   `api/strava-oauth.js` in a small repo (or the IronPath repo), import it at
+   vercel.com → *Add New → Project*. In the project's **Settings → Environment
+   Variables** add `STRAVA_CLIENT_ID` and `STRAVA_CLIENT_SECRET`, then deploy. Your
+   function URL is `https://<project>.vercel.app/api/strava-oauth`.
+   *(Cloudflare Workers works too — use the Worker variant commented at the bottom of
+   the file, set the same two vars as Worker secrets.)*
+3. **Get your one-time refresh token.** In a browser, visit (one line, your Client ID):
+   `https://www.strava.com/oauth/authorize?client_id=<CLIENT_ID>&response_type=code&redirect_uri=http://localhost/exchange_token&approval_prompt=force&scope=activity:read_all`
+   Approve. You land on a `http://localhost/exchange_token?...&code=XXXX&...` URL that
+   won't load — that's fine; copy the **`code`** value out of the address bar. Trade it
+   once for tokens (from a terminal, or Vercel's function logs):
+   `curl -X POST https://<project>.vercel.app/api/strava-oauth -H "Content-Type: application/json" -d '{"grant_type":"authorization_code","code":"XXXX"}'`
+   The response contains a **`refresh_token`** — that's the long-lived one you keep.
+4. **Put them in the app.** Setup → Strava → *Auto-refresh*: paste the function URL and
+   the refresh token, Save. From now on the app fetches a fresh access token itself
+   before each sync — you never touch a token again. The status line shows how long
+   the current token is valid.
+
+Keep the Client Secret only on the host (its env vars) — never in the app, a URL, or a
+chat. The refresh token is stored on your device like the rest of your data.
+
 ## Letting Claude push updates for you
 In a future session, Claude produces the changes. Then either:
 - You've run `gh auth login` in that session → Claude commits and pushes; auto-deploy

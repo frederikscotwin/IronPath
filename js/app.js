@@ -11,7 +11,7 @@ import * as PL from './plan.js';
 import * as A from './adapt.js';
 import { racePlan } from './race.js';
 import { buildWorkoutFit, generateWorkoutFromSession, workoutToText } from './fitworkout.js';
-import { fetchStravaStreams, fetchStravaDetail } from './strava.js';
+import { fetchStravaStreams, fetchStravaDetail, refreshViaProxy, stravaNeedsRefresh } from './strava.js';
 import { buildAiPayload, buildPrompt } from './aiexport.js';
 import * as AI from './aicoach.js';
 import * as WL from './webllm.js';
@@ -23,17 +23,18 @@ const SPORT_COLORS = {
 };
 function getVar(n) { return getComputedStyle(document.documentElement).getPropertyValue(n).trim() || '#888'; }
 
-const state = { settings: null, activities: [], plan: null, weights: [], tests: [], wellness: [], journal: [], chat: [], pmc: [], est: null, tab: 'home' };
+const state = { settings: null, activities: [], plan: null, weights: [], tests: [], wellness: [], journal: [], modifiers: [], chat: [], pmc: [], est: null, tab: 'home' };
 
 function todayWellness() { const k = M.dayKey(new Date()); return state.wellness.find(w => w.date === k) || null; }
+function modsNow() { return A.modifierState(state.modifiers, M.dayKey(new Date())); }
 
 // ---- boot -------------------------------------------------------------------
 
 init();
 async function init() {
   try {
-    [state.settings, state.activities, state.plan, state.weights, state.tests, state.wellness, state.journal] = await Promise.all([
-      store.getSettings(), store.getAllActivities(), store.getPlan(), store.getAllWeights(), store.getAllTests(), store.getAllWellness(), store.getAllJournal(),
+    [state.settings, state.activities, state.plan, state.weights, state.tests, state.wellness, state.journal, state.modifiers] = await Promise.all([
+      store.getSettings(), store.getAllActivities(), store.getPlan(), store.getAllWeights(), store.getAllTests(), store.getAllWellness(), store.getAllJournal(), store.getAllModifiers(),
     ]);
   } catch (e) {
     document.getElementById('view').innerHTML = `<div class="card"><h3>Storage error</h3><p>${e.message}</p><p class="muted">IronPath needs IndexedDB. If you're in private browsing, try a normal window.</p></div>`;
@@ -117,9 +118,13 @@ function countdown() {
 
 function renderHome() {
   const today = state.pmc.filter(p => !p.isFuture).slice(-1)[0];
-  const sug = M.suggestions(state.pmc, state.settings, state.plan);
+  const mods = modsNow();
+  const sug = M.suggestions(state.pmc, state.settings, state.plan, mods);
+  const recoveryCard = mods.active.length ? `<div class="card ready-amber"><h3>Recovery &amp; adjustments</h3>
+    ${mods.active.map(a => `<div class="sess"><span class="dot" style="background:var(--warn)"></span><div class="meta"><div class="t">${cap(a.type.replace('_', ' '))} · day ${a.dayOf}/${a.totalDays}</div><div class="d">severity ${a.severity}/10 · −${a.points} form now${a.note ? ' · ' + escapeHtml(a.note) : ''}</div></div><button class="btn sm ghost" data-action="delModifier" data-id="${a.id}">✕</button></div>`).join('')}
+    <p class="field-note">Set by you or the coach; each decays to zero over its window and eases readiness and the plan while active.</p></div>` : '';
   const signals = A.fatigueSignals(state.pmc);
-  const readiness = A.dailyReadiness(signals, M.weightTrend(state.weights), state.settings, todayWellness());
+  const readiness = A.dailyReadiness(signals, M.weightTrend(state.weights), state.settings, todayWellness(), mods);
   const readyChip = signals ? `<div class="card ready-${readiness.color}"><div class="spread">
     <div style="display:flex;gap:11px;align-items:center"><span class="ready-dot ${readiness.color}"></span>
       <div><div style="font-weight:700">Readiness ${readiness.score}<span class="muted" style="font-weight:400"> / 100</span></div>
@@ -162,6 +167,7 @@ function renderHome() {
   return `<h2 class="page-title">Dashboard</h2>
     ${tiles}
     ${readyChip}
+    ${recoveryCard}
     <div class="dash-2"><div>${chart}</div><div>${sugCards}${recentCard}</div></div>
     ${quick}`;
 }
@@ -273,7 +279,7 @@ function renderPlan() {
   }
   // Auto-regulation
   const signals = A.fatigueSignals(state.pmc);
-  const adapt = A.adaptationSuggestions(state.plan, signals, state.settings, todayWellness());
+  const adapt = A.adaptationSuggestions(state.plan, signals, state.settings, todayWellness(), modsNow());
   window.__adapt = adapt.changes;
   const autoAdapt = state.settings.autoAdaptApply;
   const toggle = `<label class="toggle"><input type="checkbox" data-action="toggleAutoAdapt" ${autoAdapt ? 'checked' : ''}> Auto-apply</label>`;
@@ -694,14 +700,18 @@ function renderSetup() {
       <label>On-device model <span class="muted">(WebLLM id)</span></label>
       <input id="s_ailocal" value="${escapeAttr(s.aiLocalModel)}">
       <label style="margin-top:12px">The coach may edit (each still needs your approval)</label>
-      <div class="chips" id="aiScopes">${['journal', 'wellness', 'plan', 'thresholds'].map(k => `<span class="chip" data-action="toggleScope" data-scope="${k}" aria-pressed="${!!(s.aiScopes && s.aiScopes[k])}">${cap(k)}</span>`).join('')}</div>
+      <div class="chips" id="aiScopes">${['journal', 'wellness', 'plan', 'thresholds', 'recovery'].map(k => `<span class="chip" data-action="toggleScope" data-scope="${k}" aria-pressed="${!!(s.aiScopes && s.aiScopes[k])}">${cap(k)}</span>`).join('')}</div>
       <label>Perceived-fatigue weight in readiness</label><input id="s_subj" type="number" step="0.5" value="${s.aiSubjectiveWeight ?? 1}">
       <p class="field-note">Cloud works with any OpenAI-compatible API (OpenRouter, Groq, OpenAI, or a local Ollama/LM Studio server). On-device runs a small model in the browser via WebGPU — big first download, no key, fully private. Your key stays on this device and is sent only to your chosen endpoint.</p>
     </div>
     <div class="card"><h3>Strava</h3>
-      <label>Access token <span class="muted">(paste a personal token; see README for auto-refresh)</span></label>
+      <label>Access token <span class="muted">(paste a personal token; expires ~6h)</span></label>
       <input id="s_strava" value="${escapeAttr(s.stravaAccessToken)}" placeholder="paste Strava access token">
-      <p class="field-note">Tokens expire ~6 hours. For hands-off sync, deploy the serverless helper in the README.</p>
+      <label style="margin-top:12px">Auto-refresh <span class="muted">(hands-off — never re-paste)</span></label>
+      <div class="row"><div><label>Proxy function URL</label><input id="s_stravaproxy" value="${escapeAttr(s.stravaProxyUrl)}" placeholder="https://your-app.vercel.app/api/strava-oauth"></div>
+        <div><label>Refresh token</label><input id="s_stravarefresh" type="password" value="${escapeAttr(s.stravaRefreshToken)}" placeholder="from the one-time authorize"></div></div>
+      <p class="field-note">${stravaTokenStatus(s)}</p>
+      <p class="field-note">Access tokens live ~6 hours. Paste a token for a quick start, or set the proxy URL + refresh token for hands-off sync — the app then fetches a fresh token itself before each sync. Your Strava <b>client secret</b> stays on the proxy, never in the app. See DEPLOY.md for the 2-minute setup.</p>
     </div>
     <div class="card"><div class="card-actions"><button class="btn primary" data-action="saveSettings">Save settings</button></div></div>
     <div class="card"><h3>Your data</h3>
@@ -713,7 +723,7 @@ function renderSetup() {
       <p class="field-note">${state.activities.length} sessions stored locally. The backup is a full copy you own — settings, plan, weights, tests and every session.</p>
       <p class="field-note" id="storageStatus">Checking storage…</p>
     </div>
-    <p class="sub right">IronPath · local-first · v1</p>`;
+    <p class="sub right">IronPath · local-first · v3</p>`;
 }
 
 // ---- view-level event binding ----------------------------------------------
@@ -771,6 +781,7 @@ const ACTIONS = {
   dismissActions: () => { state.pendingActions = null; render(); },
   addJournal: () => addJournalPrompt(),
   delJournal: async (t) => { await store.deleteJournalEntry(t.dataset.id); state.journal = await store.getAllJournal(); render(); },
+  delModifier: async (t) => { await store.deleteModifier(t.dataset.id); state.modifiers = await store.getAllModifiers(); recompute(); render(); toast('Modifier cleared.', 'ok'); },
   toggleScope: (t) => { t.setAttribute('aria-pressed', t.getAttribute('aria-pressed') !== 'true'); },
 };
 
@@ -815,7 +826,9 @@ async function approveActions() {
   await store.savePlan(out.plan); await store.saveSettings(out.settings);
   for (const w of out.wellnessUpserts) await store.putWellness(w);
   for (const j of out.journalAdds) await store.putJournalEntry(j);
-  [state.settings, state.plan, state.wellness, state.journal] = await Promise.all([store.getSettings(), store.getPlan(), store.getAllWellness(), store.getAllJournal()]);
+  for (const m of (out.modifierUpserts || [])) await store.putModifier(m);
+  for (const id of (out.modifierDeletes || [])) await store.deleteModifier(id);
+  [state.settings, state.plan, state.wellness, state.journal, state.modifiers] = await Promise.all([store.getSettings(), store.getPlan(), store.getAllWellness(), store.getAllJournal(), store.getAllModifiers()]);
   state.pendingActions = null; recompute(); render();
   toast(`Applied: ${out.summary.join('; ') || 'changes'}.`, 'ok');
 }
@@ -846,7 +859,7 @@ async function toggleAutoAdapt(on) {
 async function applyPendingAdapt() {
   if (!state.settings.autoAdaptApply) return;
   const signals = A.fatigueSignals(state.pmc);
-  const adapt = A.adaptationSuggestions(state.plan, signals, state.settings, todayWellness());
+  const adapt = A.adaptationSuggestions(state.plan, signals, state.settings, todayWellness(), modsNow());
   if (adapt.changes.length) {
     state.plan = A.applyAdaptation(state.plan, adapt.changes);
     await store.savePlan(state.plan); recompute();
@@ -861,8 +874,10 @@ async function genTaper() {
   toast(`Taper added — ${taper.summary.length} weeks to race day.`, 'ok');
 }
 async function fetchStravaStreamsForRecent() {
-  const token = state.settings.stravaAccessToken;
-  if (!token) { toast('Add a Strava token in Setup first.', 'err'); state.tab = 'setup'; render(); return; }
+  const hasAuth = state.settings.stravaAccessToken || (state.settings.stravaProxyUrl && state.settings.stravaRefreshToken);
+  if (!hasAuth) { toast('Add a Strava token in Setup first.', 'err'); state.tab = 'setup'; render(); return; }
+  const token = await ensureStravaToken();
+  if (!token) { toast('No valid Strava token — check Setup.', 'err'); state.tab = 'setup'; render(); return; }
   const targets = state.activities.filter(a => a.source === 'strava' && a.stravaId && !a.enriched)
     .sort((x, y) => y.startTime.localeCompare(x.startTime)).slice(0, 15);
   if (!targets.length) { toast('Strava activities already enriched.'); return; }
@@ -1053,15 +1068,33 @@ async function saveSettings() {
   const scopeEls = document.querySelectorAll('#aiScopes [data-scope]');
   if (scopeEls.length) { const sc = {}; scopeEls.forEach(el => sc[el.dataset.scope] = el.getAttribute('aria-pressed') === 'true'); s.aiScopes = sc; }
   s.stravaAccessToken = val('s_strava').trim();
+  s.stravaProxyUrl = val('s_stravaproxy').trim(); s.stravaRefreshToken = val('s_stravarefresh').trim();
   state.settings = s;
   await store.saveSettings(s);
   recompute(); render();
   toast('Settings saved — model updated.', 'ok');
 }
 
+// Return a valid access token, transparently refreshing it via the serverless
+// proxy when one is configured and the current token is expired (or near it).
+// Falls back to the pasted token when no proxy/refresh token is set up.
+async function ensureStravaToken() {
+  const s = state.settings;
+  if (!stravaNeedsRefresh(s)) return s.stravaAccessToken;
+  toast('Refreshing Strava token…');
+  const r = await refreshViaProxy(s.stravaProxyUrl, s.stravaRefreshToken);
+  if (!r || !r.access_token) throw new Error('Token refresh failed — check the proxy URL and refresh token in Setup.');
+  const upd = { ...s, stravaAccessToken: r.access_token, stravaTokenExpiry: r.expires_at || 0 };
+  if (r.refresh_token) upd.stravaRefreshToken = r.refresh_token; // Strava may rotate it
+  state.settings = upd; await store.saveSettings(upd);
+  return r.access_token;
+}
+
 async function syncStrava() {
-  const token = state.settings.stravaAccessToken;
-  if (!token) { toast('Add a Strava access token in Setup first.', 'err'); state.tab = 'setup'; render(); return; }
+  const hasAuth = state.settings.stravaAccessToken || (state.settings.stravaProxyUrl && state.settings.stravaRefreshToken);
+  if (!hasAuth) { toast('Add a Strava access token (or auto-refresh) in Setup first.', 'err'); state.tab = 'setup'; render(); return; }
+  const token = await ensureStravaToken();
+  if (!token) { toast('No valid Strava token — check Setup.', 'err'); state.tab = 'setup'; render(); return; }
   toast('Fetching from Strava…');
   const latest = state.activities.filter(a => a.source === 'strava').map(a => a.startTime).sort().slice(-1)[0];
   const after = latest ? Math.floor(new Date(latest).getTime() / 1000) : 0;
@@ -1183,6 +1216,18 @@ function val(id) { return document.getElementById(id)?.value ?? ''; }
 function numv(id) { return parseFloat(val(id)) || 0; }
 function intOrNull(v) { const n = parseInt(v); return Number.isFinite(n) ? n : null; }
 function clamp01(x) { return Math.max(0, Math.min(1, x)); }
+function stravaTokenStatus(s) {
+  if (s.stravaProxyUrl && s.stravaRefreshToken) {
+    const now = Math.floor(Date.now() / 1000);
+    if (s.stravaTokenExpiry && s.stravaTokenExpiry > now) {
+      const mins = Math.round((s.stravaTokenExpiry - now) / 60);
+      return `Auto-refresh on — current token valid ${mins > 90 ? Math.round(mins / 60) + ' h' : mins + ' min'} more; the app refreshes it automatically when needed.`;
+    }
+    return 'Auto-refresh on — a fresh token is fetched on your next sync.';
+  }
+  if (s.stravaAccessToken) return 'Using a manually pasted token — it will expire in ~6 hours. Add the proxy + refresh token below to make it hands-off.';
+  return 'Not connected. Paste a token, or set up auto-refresh (below) for hands-off sync.';
+}
 function basisLabel(s) {
   if (s.loadBasis === 'energy') return { name: 'Energy', sub: 'weight-driven' };
   if (s.loadBasis === 'combined') return { name: 'Combined', sub: `${Math.round((s.energyBlend ?? 0.5) * 100)}% energy` };

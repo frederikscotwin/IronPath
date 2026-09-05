@@ -296,15 +296,21 @@ export function weeklyVolume(activities, settings) {
 
 // ---- suggestions ------------------------------------------------------------
 // Simple, legible rules over the model. Each returns {level, title, detail}.
-export function suggestions(pmc, settings, plan) {
+export function suggestions(pmc, settings, plan, mods) {
   const out = [];
   if (!pmc.length) {
     out.push({ level: 'info', title: 'No data yet',
       detail: 'Import a .fit/.tcx/.gpx file or add a session manually to start building your fitness picture.' });
     return out;
   }
+  // Coach-set recovery/illness modifiers lead the status and lower effective form.
+  for (const a of (mods?.active || [])) {
+    out.push({ level: (a.type === 'illness' || a.type === 'injury') ? 'warn' : 'info',
+      title: `${a.type === 'illness' ? 'Recovering from illness' : a.type === 'injury' ? 'Managing an injury' : a.type === 'fatigue_offset' ? 'Feeling below the numbers' : a.type === 'travel' ? 'Travel disruption' : 'Under extra life stress'} — day ${a.dayOf}/${a.totalDays}`,
+      detail: `${a.note ? a.note + '. ' : ''}Effective form is knocked down while this decays; the plan and readiness are easing accordingly.` });
+  }
   const today = pmc.filter(p => !p.isFuture).slice(-1)[0] || pmc[pmc.length - 1];
-  const tsb = today.tsb;
+  const tsb = today.tsb - (mods?.points || 0);
   const ramp = rampRate(pmc.filter(p => !p.isFuture));
 
   if (tsb < settings.tsbDeepFatigue) {

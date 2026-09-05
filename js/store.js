@@ -84,7 +84,9 @@ export const DEFAULT_SETTINGS = {
 
   // Strava (optional). Token pasted in Settings or fetched via the OAuth helper.
   stravaAccessToken: '',
-  stravaTokenExpiry: 0,
+  stravaTokenExpiry: 0,          // epoch seconds when the access token expires
+  stravaProxyUrl: '',            // your serverless token-refresh function (client secret stays there)
+  stravaRefreshToken: '',        // long-lived; the proxy trades it for a fresh access token
 
   // In-app AI coach. Provider-agnostic (OpenAI-compatible) OR on-device (WebLLM).
   aiEngine: 'cloud',          // 'cloud' | 'local'
@@ -92,14 +94,14 @@ export const DEFAULT_SETTINGS = {
   aiModel: '',                // e.g. gpt-4o-mini, anthropic/claude-3.5-sonnet, llama3.1
   aiApiKey: '',               // stored locally; sent only to your chosen endpoint
   aiLocalModel: 'Llama-3.2-3B-Instruct-q4f16_1-MLC', // WebLLM model id for on-device
-  aiScopes: { journal: true, wellness: true, plan: true, thresholds: true }, // what the AI may edit (all via approval)
+  aiScopes: { journal: true, wellness: true, plan: true, thresholds: true, recovery: true }, // what the AI may edit (all via approval)
   aiSubjectiveWeight: 1.0,    // how strongly perceived fatigue nudges readiness (0 = ignore)
 
   version: 1,
 };
 
 const DB_NAME = 'ironpath';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 function openDb() {
   return new Promise((resolve, reject) => {
@@ -125,6 +127,9 @@ function openDb() {
       }
       if (!db.objectStoreNames.contains('journal')) {
         db.createObjectStore('journal', { keyPath: 'id' }); // journal entries (user + AI)
+      }
+      if (!db.objectStoreNames.contains('modifiers')) {
+        db.createObjectStore('modifiers', { keyPath: 'id' }); // illness/injury/stress/form-offset events
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -251,19 +256,35 @@ export async function deleteJournalEntry(id) {
   return done(tx(db, 'journal', 'readwrite').delete(id));
 }
 
+// ---- modifiers (illness / injury / stress / form offset) --------------------
+
+export async function getAllModifiers() {
+  const db = await openDb();
+  const rows = await done(tx(db, 'modifiers', 'readonly').getAll());
+  return rows.sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+}
+export async function putModifier(m) {
+  const db = await openDb();
+  return done(tx(db, 'modifiers', 'readwrite').put(m)); // { id, date, type, severity, durationDays, note, source }
+}
+export async function deleteModifier(id) {
+  const db = await openDb();
+  return done(tx(db, 'modifiers', 'readwrite').delete(id));
+}
+
 // ---- full backup ------------------------------------------------------------
 
 export async function exportBackup() {
-  const [activities, settings, plan, weights, tests, wellness, journal] = await Promise.all([
-    getAllActivities(), getSettings(), getPlan(), getAllWeights(), getAllTests(), getAllWellness(), getAllJournal()]);
-  return { app: 'ironpath', version: 3, exportedAt: new Date().toISOString(), settings, plan, activities, weights, tests, wellness, journal };
+  const [activities, settings, plan, weights, tests, wellness, journal, modifiers] = await Promise.all([
+    getAllActivities(), getSettings(), getPlan(), getAllWeights(), getAllTests(), getAllWellness(), getAllJournal(), getAllModifiers()]);
+  return { app: 'ironpath', version: 4, exportedAt: new Date().toISOString(), settings, plan, activities, weights, tests, wellness, journal, modifiers };
 }
 
 export async function importBackup(obj, mode = 'merge') {
   if (!obj || obj.app !== 'ironpath') throw new Error('Not an IronPath backup file.');
   if (mode === 'replace') {
     const db = await openDb();
-    for (const s of ['activities', 'weights', 'tests', 'wellness', 'journal']) await done(tx(db, s, 'readwrite').clear());
+    for (const s of ['activities', 'weights', 'tests', 'wellness', 'journal', 'modifiers']) await done(tx(db, s, 'readwrite').clear());
   }
   if (obj.settings) await saveSettings(obj.settings);
   if (obj.plan) await savePlan(obj.plan);
@@ -272,5 +293,6 @@ export async function importBackup(obj, mode = 'merge') {
   for (const t of (obj.tests || [])) await putTest(t);
   for (const w of (obj.wellness || [])) await putWellness(w);
   for (const j of (obj.journal || [])) await putJournalEntry(j);
+  for (const m of (obj.modifiers || [])) await putModifier(m);
   return { count: (obj.activities || []).length };
 }

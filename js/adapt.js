@@ -6,6 +6,30 @@ import { clamp, dayKey, addDays } from './model.js';
 
 function std(a) { if (a.length < 2) return 0; const m = a.reduce((s, x) => s + x, 0) / a.length; return Math.sqrt(a.reduce((s, x) => s + (x - m) ** 2, 0) / a.length); }
 
+// ---- coach-set modifiers: illness / injury / stress / subjective offset ------
+// Each is a dated event with a severity (1-10) and a duration the coach judges.
+// Its impact starts at full strength and decays linearly to zero across the
+// window, expressed as "form points" that lower readiness and adjusted form.
+const MOD_WEIGHT = { illness: 3, injury: 2.6, stress: 1.4, travel: 1.0, fatigue_offset: 2.0 };
+export const MOD_LABEL = { illness: 'Illness', injury: 'Injury', stress: 'Life stress', travel: 'Travel', fatigue_offset: 'Feeling flat' };
+function daysBetween(a, b) { const [ay, am, ad] = a.split('-').map(Number); const [by, bm, bd] = b.split('-').map(Number); return Math.round((Date.UTC(by, bm - 1, bd) - Date.UTC(ay, am - 1, ad)) / 86400000); }
+
+export function modifierState(modifiers, day) {
+  day = day || dayKey(new Date());
+  let points = 0; const active = []; const reasons = [];
+  for (const m of (modifiers || [])) {
+    if (!m.date || !m.durationDays) continue;
+    const elapsed = daysBetween(m.date, day);
+    if (elapsed < 0 || elapsed > m.durationDays) continue;
+    const decay = Math.max(0, 1 - elapsed / m.durationDays);
+    const contrib = (m.severity || 5) * (MOD_WEIGHT[m.type] ?? 1.5) * decay;
+    points += contrib;
+    active.push({ id: m.id, type: m.type, severity: m.severity, dayOf: Math.floor(elapsed) + 1, totalDays: m.durationDays, note: m.note || '', points: Math.round(contrib) });
+    reasons.push(`${MOD_LABEL[m.type] || m.type}${m.note ? ' — ' + m.note : ''} (day ${Math.floor(elapsed) + 1}/${m.durationDays})`);
+  }
+  return { points: Math.round(points), active, reasons };
+}
+
 // ---- fatigue signals from the daily-load series -----------------------------
 // ACWR — acute (7d) vs chronic (28d) workload ratio; the classic 0.8–1.3 "sweet
 // spot", >1.5 a danger spike. Monotony/Strain — Foster's measures: monotony is
@@ -31,10 +55,11 @@ export function fatigueSignals(pmc) {
 // ---- daily readiness --------------------------------------------------------
 // `wellness` is today's self-reported entry ({fatigue 1-10, sleep hours,
 // soreness 1-10, stress 1-10}) — what you feel, folded in alongside the model.
-export function dailyReadiness(signals, weight, settings, wellness) {
+export function dailyReadiness(signals, weight, settings, wellness, mods) {
   if (!signals) return { score: null, color: 'grey', reasons: ['No data yet'] };
   let score = 100;
   const reasons = [];
+  if (mods && mods.points) { score -= Math.min(mods.points, 45); for (const r of mods.reasons.slice().reverse()) reasons.unshift(r); }
   if (signals.tsb < settings.tsbDeepFatigue) { score -= 35; reasons.push(`Form very low (${signals.tsb.toFixed(0)})`); }
   else if (signals.tsb < -10) { score -= 15; reasons.push(`Carrying fatigue (form ${signals.tsb.toFixed(0)})`); }
   if (signals.acwr > (settings.acwrHigh ?? 1.5)) { score -= 25; reasons.push(`Load spike (ACWR ${signals.acwr.toFixed(2)})`); }
@@ -59,33 +84,37 @@ export function dailyReadiness(signals, weight, settings, wellness) {
 }
 
 // ---- adaptation pass --------------------------------------------------------
-function overloadReason(s, settings, wellness) {
+function overloadReason(s, settings, wellness, mods) {
   const bits = [];
-  if (s.tsb < settings.tsbDeepFatigue) bits.push(`form ${s.tsb.toFixed(0)}`);
+  const adjTsb = s.tsb - (mods?.points || 0);
+  if (adjTsb < settings.tsbDeepFatigue) bits.push(`form ${adjTsb.toFixed(0)}`);
   if (s.acwr > (settings.acwrHigh ?? 1.5)) bits.push(`ACWR ${s.acwr.toFixed(2)}`);
   if (wellness && Number.isFinite(wellness.fatigue) && wellness.fatigue >= 8) bits.push(`reported fatigue ${wellness.fatigue}/10`);
-  return `You're overreaching (${bits.join(', ')}) — easing the hardest upcoming sessions.`;
+  for (const a of (mods?.active || [])) if ((a.type === 'illness' || a.type === 'injury') && a.severity >= 5) bits.push(`${(MOD_LABEL[a.type] || a.type).toLowerCase()} day ${a.dayOf}/${a.totalDays}`);
+  return `Easing the hardest upcoming sessions (${bits.join(', ')}).`;
 }
 
-export function adaptationSuggestions(plan, signals, settings, wellness) {
+export function adaptationSuggestions(plan, signals, settings, wellness, mods) {
   const today = dayKey(new Date());
   const horizon = addDays(today, settings.adaptHorizonDays ?? 7);
   const upcoming = (plan.sessions || []).filter(s => s.date >= today && s.date <= horizon && (s.targetLoad || 0) > 0);
   if (!signals || !upcoming.length) return { state: 'ontrack', changes: [], signals };
 
-  // Overload cuts load on form/ACWR, or when you report very high fatigue today.
-  // High monotony is an "add variety" nudge, not a reason to reduce volume.
+  // Overload cuts load on form/ACWR, on very high reported fatigue, or on an
+  // active illness/injury. High monotony stays an "add variety" nudge.
   const highSubjective = wellness && Number.isFinite(wellness.fatigue) && wellness.fatigue >= 8;
-  const overload = signals.tsb < settings.tsbDeepFatigue
+  const adjTsb = signals.tsb - (mods?.points || 0);
+  const recovering = mods?.active?.some(a => (a.type === 'illness' || a.type === 'injury') && (a.severity || 0) >= 5);
+  const overload = adjTsb < settings.tsbDeepFatigue
     || signals.acwr > (settings.acwrHigh ?? 1.5)
-    || highSubjective;
+    || highSubjective || recovering;
   const detrain = signals.tsb > (settings.tsbVeryFresh ?? 15)
     && signals.acwr && signals.acwr < (settings.acwrLow ?? 0.8) && signals.acute7 > 0;
 
   const changes = [];
   if (overload) {
     const cut = settings.adaptCutPct ?? 0.6;
-    const reason = overloadReason(signals, settings, wellness);
+    const reason = overloadReason(signals, settings, wellness, mods);
     const sorted = [...upcoming].sort((a, b) => (b.targetLoad || 0) - (a.targetLoad || 0));
     for (const s of sorted.slice(0, 2)) {
       changes.push({
