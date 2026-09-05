@@ -4,6 +4,12 @@
   publish = "."
   command = ""
 
+# Serverless function for hands-off Strava token refresh (keeps your client
+# secret off the browser). Set STRAVA_CLIENT_ID + STRAVA_CLIENT_SECRET in
+# Site settings → Environment variables. Endpoint: /.netlify/functions/strava-oauth
+[functions]
+  directory = "netlify/functions"
+
 # Never long-cache the service worker or manifest, so updates propagate promptly.
 [[headers]]
   for = "/sw.js"

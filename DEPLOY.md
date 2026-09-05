@@ -50,30 +50,45 @@ access token on demand. The app on GitHub Pages can't run this itself (Pages ser
 static files only), so it lives on a free host that runs code. Two moving parts:
 your app stays where it is; the function is a separate micro-service the app calls.
 
-`server/strava-oauth.js` is that function. Easiest host is **Vercel** (the file is
-already written as a Vercel handler):
+The function ships two ways in this repo: `netlify/functions/strava-oauth.js` (a
+Netlify Function, wired up in `netlify.toml`) and `server/strava-oauth.js` (the same
+logic as a Vercel handler / Cloudflare Worker). Pick the host you already use.
 
-1. **Get your Strava app credentials.** strava.com/settings/api → note the
-   **Client ID** and **Client Secret**. Set the app's *Authorization Callback Domain*
-   to `localhost` (only used for the one-time authorize below).
-2. **Deploy the function to Vercel.** Easiest: put `server/strava-oauth.js` at
-   `api/strava-oauth.js` in a small repo (or the IronPath repo), import it at
-   vercel.com → *Add New → Project*. In the project's **Settings → Environment
-   Variables** add `STRAVA_CLIENT_ID` and `STRAVA_CLIENT_SECRET`, then deploy. Your
-   function URL is `https://<project>.vercel.app/api/strava-oauth`.
-   *(Cloudflare Workers works too — use the Worker variant commented at the bottom of
-   the file, set the same two vars as Worker secrets.)*
+### Netlify (recommended if you have an account — app + function on one site)
+
+1. **Get your Strava app credentials.** strava.com/settings/api → note the **Client
+   ID** and **Client Secret**. Set *Authorization Callback Domain* to `localhost` (only
+   used for the one-time authorize in step 3).
+2. **Deploy this repo to Netlify.** *Add new site → Import an existing project*, pick
+   the IronPath repo (no build command; publish dir `.` — `netlify.toml` sets both,
+   plus the functions directory). In **Site settings → Environment variables** add
+   `STRAVA_CLIENT_ID` and `STRAVA_CLIENT_SECRET`, then trigger a deploy. The site
+   serves the app *and* the function; the function is at
+   `https://<site>.netlify.app/.netlify/functions/strava-oauth`.
 3. **Get your one-time refresh token.** In a browser, visit (one line, your Client ID):
    `https://www.strava.com/oauth/authorize?client_id=<CLIENT_ID>&response_type=code&redirect_uri=http://localhost/exchange_token&approval_prompt=force&scope=activity:read_all`
    Approve. You land on a `http://localhost/exchange_token?...&code=XXXX&...` URL that
    won't load — that's fine; copy the **`code`** value out of the address bar. Trade it
-   once for tokens (from a terminal, or Vercel's function logs):
-   `curl -X POST https://<project>.vercel.app/api/strava-oauth -H "Content-Type: application/json" -d '{"grant_type":"authorization_code","code":"XXXX"}'`
-   The response contains a **`refresh_token`** — that's the long-lived one you keep.
+   once for tokens:
+   `curl -X POST https://<site>.netlify.app/.netlify/functions/strava-oauth -H "Content-Type: application/json" -d '{"grant_type":"authorization_code","code":"XXXX"}'`
+   The response contains a **`refresh_token`** — the long-lived one you keep.
 4. **Put them in the app.** Setup → Strava → *Auto-refresh*: paste the function URL and
    the refresh token, Save. From now on the app fetches a fresh access token itself
-   before each sync — you never touch a token again. The status line shows how long
-   the current token is valid.
+   before each sync — you never touch a token again; the status line shows how long the
+   current token is valid.
+   - If you now open the app at the **Netlify URL** (rather than github.io), the app and
+     function are same-origin, so you can shorten the proxy field to just
+     `/.netlify/functions/strava-oauth`. Note that switching URL means a fresh empty
+     app (data is tied to the origin) — Export a backup on the old URL and Import it on
+     the new one if you've logged anything.
+   - If you keep the app on **github.io**, use the full `https://<site>.netlify.app/...`
+     URL in the proxy field; the function's CORS header allows the cross-origin call.
+
+### Vercel / Cloudflare (alternative)
+
+Use `server/strava-oauth.js` instead: on Vercel drop it at `api/strava-oauth.js` (URL
+`…/api/strava-oauth`); on Cloudflare use the Worker variant commented at the bottom of
+the file. Set the same two env vars, then follow steps 3–4 with that URL.
 
 Keep the Client Secret only on the host (its env vars) — never in the app, a URL, or a
 chat. The refresh token is stored on your device like the rest of your data.

@@ -708,7 +708,7 @@ function renderSetup() {
       <label>Access token <span class="muted">(paste a personal token; expires ~6h)</span></label>
       <input id="s_strava" value="${escapeAttr(s.stravaAccessToken)}" placeholder="paste Strava access token">
       <label style="margin-top:12px">Auto-refresh <span class="muted">(hands-off — never re-paste)</span></label>
-      <div class="row"><div><label>Proxy function URL</label><input id="s_stravaproxy" value="${escapeAttr(s.stravaProxyUrl)}" placeholder="https://your-app.vercel.app/api/strava-oauth"></div>
+      <div class="row"><div><label>Proxy function URL</label><input id="s_stravaproxy" value="${escapeAttr(s.stravaProxyUrl)}" placeholder="https://your-site.netlify.app/.netlify/functions/strava-oauth"></div>
         <div><label>Refresh token</label><input id="s_stravarefresh" type="password" value="${escapeAttr(s.stravaRefreshToken)}" placeholder="from the one-time authorize"></div></div>
       <p class="field-note">${stravaTokenStatus(s)}</p>
       <p class="field-note">Access tokens live ~6 hours. Paste a token for a quick start, or set the proxy URL + refresh token for hands-off sync — the app then fetches a fresh token itself before each sync. Your Strava <b>client secret</b> stays on the proxy, never in the app. See DEPLOY.md for the 2-minute setup.</p>

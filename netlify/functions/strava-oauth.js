@@ -1,8 +1,17 @@
-﻿// Netlify Function: hands-off Strava token refresh.
+// Netlify Function: hands-off Strava token refresh.
+// The browser must never hold your Strava CLIENT SECRET, so this function does
+// the token exchange server-side. It lives on the same Netlify site as the app,
+// so the app can call it same-origin at /.netlify/functions/strava-oauth.
+//
+// Set these in Netlify → Site settings → Environment variables:
+//   STRAVA_CLIENT_ID, STRAVA_CLIENT_SECRET
+//
+// Node 18+ (Netlify default) provides a global fetch — no dependencies needed.
+
 exports.handler = async (event) => {
   const headers = {
     'Content-Type': 'application/json',
-    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Origin': '*',            // lets the app call it from any origin (e.g. github.io)
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
   };
@@ -23,6 +32,7 @@ exports.handler = async (event) => {
   try {
     const r = await fetch('https://www.strava.com/oauth/token', { method: 'POST', body: params });
     const data = await r.json();
+    // Return only what the client needs — never the client secret.
     return {
       statusCode: r.ok ? 200 : 400,
       headers,
